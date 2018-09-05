@@ -1,0 +1,3 @@
+*.gz
+*model/
+.ipynb_checkpoints/
