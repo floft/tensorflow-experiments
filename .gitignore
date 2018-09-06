@@ -1,3 +1,5 @@
 *.gz
+*.zip
 *model/
+*log*/
 .ipynb_checkpoints/

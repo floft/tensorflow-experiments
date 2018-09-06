@@ -1,0 +1,61 @@
+#!/bin/bash
+#SBATCH --job-name=vae
+#SBATCH --output=slurm_logs/vae_%j.out
+#SBATCH --error=slurm_logs/vae_%j.err
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=2
+#SBATCH --nodes=1-1
+#SBATCH --gres=gpu:tesla:8
+#SBATCH --partition=taylor,kamiak,cahnrs_gpu,free_gpu,vcea,cahnrs,cahnrs_bigmem
+#SBATCH --time=4-00:00:00
+#SBATCH --mem=100G
+
+. kamiak_config.sh
+
+#
+# ---
+#
+
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+module load cuda/8.0.44 cudnn/6.0_cuda8.0 python3/3.5.0
+data="$remotedir"
+
+function clean_up 
+{
+    rmworkspace -a -f --name="$SCRATCHDIR"
+    exit
+}
+
+# Create a scratch workspace
+SCRATCHDIR="$(mkworkspace -q -t 7-00:00 -b /local)" # 7 days
+trap 'clean_up' EXIT
+
+echo "Scratch space: $SCRATCHDIR"
+echo "SLURM_CPUS_PER_TASK: $SLURM_CPUS_PER_TASK"
+echo "SLURM_JOB_GPUS: $SLURM_JOB_GPUS"
+
+# Get data
+echo "Getting data: started"
+cd "$SCRATCHDIR"
+echo " - program"
+cp -a "$data/$program" .
+echo " - dataset"
+cp -a "$data/$compressedDataset" .
+unzip "$compressedDataset"
+echo "Getting data: done"
+
+# Install dependencies
+echo "Making sure TensorFlow installed: starting"
+pip install --user tensorflow-gpu pillow lxml jupyter matplotlib python-mnist
+echo "Making sure TensorFlow installed: done"
+
+# Train
+echo "Training network: started"
+mkdir -p "$data/$logFolder/" # log dir, rsync this to view with TensorBoard
+python3 "$program" --logdir "$data/$logFolder" --modeldir "$data/$modelFolder"
+echo "Training network: done"
+
+# Cleanup
+echo "Deleting workspace: started"
+clean_up
+echo "Deleting workspace: done"
