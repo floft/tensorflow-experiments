@@ -3,3 +3,6 @@
 *model/
 *log*/
 .ipynb_checkpoints/
+Plane/
+*.h5
+*.hdf5

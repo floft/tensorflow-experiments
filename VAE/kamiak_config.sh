@@ -12,4 +12,4 @@ dataset=(*.gz)
 # Note: this is rsync, so make sure all paths have a trailing slash
 remotedir="$dir/"
 remotessh="kamiak"
-localdir="/home/garrett/Documents/School/18_Fall/Research/tensorflow-experiments/"
+localdir="/home/garrett/Documents/School/18_Fall/Research/tensorflow-experiments/VAE/"
