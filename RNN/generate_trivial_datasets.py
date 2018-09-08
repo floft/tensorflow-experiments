@@ -28,7 +28,7 @@ def generate_data(n, display=False):
         plt.show()
 
     df = pd.DataFrame(y.T)
-    df.insert(0, 'class', pd.Series(np.squeeze(labels), index=df.index).astype(int))
+    df.insert(0, 'class', pd.Series(np.squeeze(labels).astype(np.int32)+1, index=df.index))
     return df
 
 if __name__ == '__main__':
