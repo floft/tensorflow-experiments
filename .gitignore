@@ -4,5 +4,6 @@
 *log*/
 .ipynb_checkpoints/
 Plane/
+trivial/
 *.h5
 *.hdf5
