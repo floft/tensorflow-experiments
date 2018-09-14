@@ -3,29 +3,80 @@
 # VRNN
 #
 import os
-import re
-import pathlib
+import time
+import argparse
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.python.keras import activations
-from tensorflow.python.keras import backend as K
+
+# Due to this being run on Kamiak, that doesn't have _tkinter, we have to set a
+# different backend otherwise it'll error
+# https://stackoverflow.com/a/40931739/2698494
+import matplotlib as mpl
+if os.environ.get('DISPLAY','') == '':
+    print('no display found. Using non-interactive Agg backend')
+    mpl.use('Agg')
+import matplotlib.pyplot as plt
+
+# Not-so-pretty code to feed data to TensorFlow.
+class IteratorInitializerHook(tf.train.SessionRunHook):
+    """Hook to initialise data iterator after Session is created.
+    https://medium.com/onfido-tech/higher-level-apis-in-tensorflow-67bfb602e6c0"""
+    def __init__(self):
+        super(IteratorInitializerHook, self).__init__()
+        self.iter_init_func = None
+
+    def after_create_session(self, sess, coord):
+        """Initialize the iterator after the session has been created."""
+        self.iter_init_func(sess)
+
+def _get_input_fn(features, labels, batch_size, evaluation=False, buffer_size=5000):
+    iter_init_hook = IteratorInitializerHook()
+
+    def input_fn():
+        # Input images using placeholders to reduce memory usage
+        features_placeholder = tf.placeholder(features.dtype, features.shape)
+        labels_placeholder = tf.placeholder(labels.dtype, labels.shape)
+        dataset = tf.data.Dataset.from_tensor_slices((features_placeholder, labels_placeholder))
+
+        if evaluation:
+            dataset = dataset.batch(batch_size)
+        else:
+            dataset = dataset.repeat().shuffle(buffer_size).batch(batch_size)
+
+        iterator = dataset.make_initializable_iterator()
+        next_data_batch, next_label_batch = iterator.get_next()
+
+        # Need to initialize iterator after creating a session in the estimator
+        iter_init_hook.iter_init_func = lambda sess: sess.run(iterator.initializer,
+                feed_dict={features_placeholder: features, labels_placeholder: labels})
+
+        return next_data_batch, next_label_batch
+    return input_fn, iter_init_hook
 
 # Load a time-series dataset. This is set up to load data in the format of the
 # UCR time-series datasets (http://www.cs.ucr.edu/~eamonn/time_series_data/).
-# Or, see the generate_trivial_datasets.py for a trivial dataset. 
-def load_data(fn):
+# Or, see the generate_trivial_datasets.py for a trivial dataset.
+#
+# Also runs through one_hot
+def load_data(filename):
     """
     Load CSV files in UCR time-series data format
-    
+
     Returns:
         data - numpy array with data of shape (num_examples, num_features)
         labels - numpy array with labels of shape: (num_examples, 1)
     """
-    df = pd.read_csv(fn, header=None)
+    df = pd.read_csv(filename, header=None)
     df_data = df.drop(0, axis=1).values.astype(np.float32)
     df_labels = df.loc[:, df.columns == 0].values.astype(np.uint8)
     return df_data, df_labels
+
+def one_hot(x, y, num_classes):
+    """ Correct dimensions, type, and one-hot encode """
+    x = np.expand_dims(x, axis=2).astype(np.float32)
+    y = np.eye(num_classes)[np.squeeze(y).astype(np.uint8) - 1] # one-hot encode
+    return x, y
 
 # Implementing VRNN. Based on:
 #  - https://github.com/phreeza/tensorflow-vrnn/blob/master/model_vrnn.py
@@ -34,11 +85,11 @@ def load_data(fn):
 class VRNNCell(tf.keras.layers.Layer):
     """
     VRNN cell
-    
+
     Usage:
         cell = VRNNCell(x_dim, h_dim, z_dim, batch_size)
         net = tf.keras.layers.RNN(cell)(net)
-    
+
     Note: probably want to use vrnn_loss though, otherwise this performs terrible.
     """
     def __init__(self, x_dim, h_dim, z_dim, **kwargs):
@@ -46,22 +97,22 @@ class VRNNCell(tf.keras.layers.Layer):
         self.n_x = x_dim
         self.n_h = h_dim
         self.n_z = z_dim
-        
+
         # Dimensions of phi(z)
         self.n_x_1 = x_dim
         self.n_z_1 = z_dim
-        
+
         # Dimensions of encoder, decoder, and prior
         self.n_enc_hidden = z_dim
         self.n_dec_hidden = x_dim
         self.n_prior_hidden = z_dim
-        
+
         # What cell we're going to use internally for the RNN
         self.cell = tf.keras.layers.LSTMCell(self.n_h,
              input_shape=(None, self.n_dec_hidden+self.n_z_1))
-        
+
         super(VRNNCell, self).__init__(**kwargs)
-    
+
     @property
     def state_size(self):
         # Note: first two are the state of the LSTM
@@ -69,7 +120,7 @@ class VRNNCell(tf.keras.layers.Layer):
                 self.n_z, self.n_z,
                 self.n_x, self.n_x,
                 self.n_z, self.n_z)
-    
+
     @property
     def output_size(self):
         return self.n_h
@@ -82,21 +133,21 @@ class VRNNCell(tf.keras.layers.Layer):
             shape=(self.n_prior_hidden, self.n_z), initializer='glorot_uniform', name='prior_mu')
         self.prior_sigma = self.add_weight(
             shape=(self.n_prior_hidden, self.n_z), initializer='glorot_uniform', name='prior_sigma')
-        
+
         self.prior_h_b = self.add_weight(
             shape=(self.n_prior_hidden,), initializer='constant', name='prior_hidden_b')
         self.prior_mu_b = self.add_weight(
             shape=(self.n_z,), initializer='constant', name='prior_mu_b')
         self.prior_sigma_b = self.add_weight(
             shape=(self.n_z,), initializer='constant', name='prior_sigma_b')
-        
+
         # Input: x
         self.x_1 = self.add_weight(
             shape=(self.n_x, self.n_x_1), initializer='glorot_uniform', name='phi_x')
-        
+
         self.x_1_b = self.add_weight(
             shape=(self.n_x_1,), initializer='constant', name='phi_x_b')
-        
+
         # Input: x and previous hidden state
         self.encoder_h = self.add_weight(
             shape=(self.n_x_1+self.n_h, self.n_enc_hidden), initializer='glorot_uniform', name='encoder_hidden')
@@ -104,21 +155,21 @@ class VRNNCell(tf.keras.layers.Layer):
             shape=(self.n_enc_hidden, self.n_z), initializer='glorot_uniform', name='encoder_mu')
         self.encoder_sigma = self.add_weight(
             shape=(self.n_enc_hidden, self.n_z), initializer='glorot_uniform', name='encoder_sigma')
-        
+
         self.encoder_h_b = self.add_weight(
             shape=(self.n_enc_hidden,), initializer='constant', name='encoder_hidden_b')
         self.encoder_mu_b = self.add_weight(
             shape=(self.n_z,), initializer='constant', name='encoder_mu_b')
         self.encoder_sigma_b = self.add_weight(
             shape=(self.n_z,), initializer='constant', name='encoder_sigma_b')
-        
+
         # Input: z = enc_sigma*eps + enc_mu -- i.e. reparameterization trick
         self.z_1 = self.add_weight(
             shape=(self.n_z, self.n_z_1), initializer='glorot_uniform', name='phi_z')
-        
+
         self.z_1_b = self.add_weight(
             shape=(self.n_z_1,), initializer='constant', name='phi_z_b')
-        
+
         # Input: latent variable (z) and previous hidden state
         self.decoder_h = self.add_weight(
             shape=(self.n_z+self.n_h, self.n_dec_hidden), initializer='glorot_uniform', name='decoder_hidden')
@@ -126,65 +177,65 @@ class VRNNCell(tf.keras.layers.Layer):
             shape=(self.n_dec_hidden, self.n_x), initializer='glorot_uniform', name='decoder_mu')
         self.decoder_sigma = self.add_weight(
             shape=(self.n_dec_hidden, self.n_x), initializer='glorot_uniform', name='decoder_sigma')
-        
+
         self.decoder_h_b = self.add_weight(
             shape=(self.n_dec_hidden,), initializer='constant', name='decoder_hidden_b')
         self.decoder_mu_b = self.add_weight(
             shape=(self.n_x,), initializer='constant', name='decoder_mu_b')
         self.decoder_sigma_b = self.add_weight(
             shape=(self.n_x,), initializer='constant', name='decoder_sigma_b')
-        
+
         super(VRNNCell, self).build(input_shape)
 
     def call(self, inputs, states, training=None):
         # Get relevant states
         h = states[0]
         c = states[1] # only passed to the LSTM
-        
+
         # Determine if training
         if training is None:
             training = K.learning_phase()
-        
+
         # Input: previous hidden state (h)
         prior_h = K.relu(K.dot(h, self.prior_h) + self.prior_h_b)
         #prior_h = K.dot(h, self.prior_h) + self.prior_h_b # Linear
         prior_mu = K.dot(prior_h, self.prior_mu) + self.prior_mu_b
         prior_sigma = K.softplus(K.dot(prior_h, self.prior_sigma) + self.prior_sigma_b) # >= 0
-        
+
         # Input: x
         x_1 = K.relu(K.dot(inputs, self.x_1) + self.x_1_b) # >= 0
-        
+
         # Input: x and previous hidden state
         encoder_input = K.concatenate((x_1, h), 1)
         encoder_h = K.relu(K.dot(encoder_input, self.encoder_h) + self.encoder_h_b)
         #encoder_h = K.dot(encoder_input, self.encoder_h) + self.encoder_h_b # Linear
         encoder_mu = K.dot(encoder_h, self.encoder_mu) + self.encoder_mu_b
         encoder_sigma = K.softplus(K.dot(encoder_h, self.encoder_sigma) + self.encoder_sigma_b)
-        
+
         # If not training, just copy the prior?
         # https://lirnli.wordpress.com/2017/09/27/variational-recurrent-neural-network-vrnn-with-pytorch/
         #encoder_mu = tf.cond(training, lambda: encoder_mu,    lambda: prior_mu)
         #encoder_mu = tf.cond(training, lambda: encoder_sigma, lambda: prior_sigma)
-        
+
         # Input: z = enc_sigma*eps + enc_mu -- i.e. reparameterization trick
         batch_size = K.shape(inputs)[0] # https://github.com/tensorflow/tensorflow/issues/373
         eps = K.random_normal((batch_size, self.n_z), dtype=tf.float32)
         z = encoder_sigma*eps + encoder_mu
         z_1 = K.relu(K.dot(z, self.z_1) + self.z_1_b)
-        
+
         # Input: latent variable (z) and previous hidden state
         decoder_input = K.concatenate((z_1, h), 1)
         decoder_h = K.relu(K.dot(decoder_input, self.decoder_h) + self.decoder_h_b)
         #decoder_h = K.dot(decoder_input, self.decoder_h) + self.decoder_h_b # Linear
         decoder_mu = K.dot(decoder_h, self.decoder_mu) + self.decoder_mu_b
         decoder_sigma = K.softplus(K.dot(decoder_h, self.decoder_sigma) + self.decoder_sigma_b)
-        
+
         # Pass to cell (e.g. LSTM). Note that the LSTM has both "h" and "c" that are combined
         # into the same next state vector. We'll combine them together to pass in and split them
         # back out after the LSTM returns the next state.
         rnn_cell_input = K.concatenate((x_1, z_1), 1)
         output, (h_next, c_next) = self.cell(rnn_cell_input, [h, c])
-        
+
         # VRNN state
         next_state = (
             h_next,
@@ -196,9 +247,10 @@ class VRNNCell(tf.keras.layers.Layer):
             prior_mu,
             prior_sigma,
         )
-        
+
         # TODO save the encoder mu/sigma for the entire history of time steps for the loss?
-        
+        # TODO maybe save x and xhat to minimize difference?
+
         return output, next_state
 
     def get_config(self):
@@ -219,7 +271,7 @@ def vrnn_loss(
     prior_mu, prior_sigma, x):
     """
     Returns function to compute VRNN loss
-    
+
     First 6 arguments are from the state of the VRNN. Also pass in x
     since we're trying to make the decoder generate x.
 
@@ -230,7 +282,7 @@ def vrnn_loss(
         y = ...
         loss = vrnn_loss(*vrnn_state, x)
     """
-    
+
     def loss_function(y_true, y_pred):
         eps = 1e-9
 
@@ -247,7 +299,7 @@ def vrnn_loss(
         # Reshape [batch_size,time_steps,num_features] -> [batch_size*time_steps,num_features]
         # so that (decoder_mu - x) will broadcast correctly
         x_reshape = tf.transpose(x, [0, 2, 1])
-        
+
         # Negative log likelihood:
         # https://papers.nips.cc/paper/7219-simple-and-scalable-predictive-uncertainty-estimation-using-deep-ensembles.pdf
         # https://fairyonice.github.io/Create-a-neural-net-with-a-negative-log-likelihood-as-a-loss.html
@@ -255,216 +307,172 @@ def vrnn_loss(
             tf.square(decoder_mu - x_reshape) / tf.maximum(eps, tf.square(decoder_sigma))
             + tf.log(tf.maximum(eps, tf.square(decoder_sigma)))
         )
-        
+
         # We'd also like to classify well
         categorical_loss = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
 
         return tf.reduce_mean(kl_loss + likelihood_loss + categorical_loss)
     return loss_function
 
+def build_lstm(x, keep_prob, lstm_sizes):
+    """
+    Generate multi-layer LSTM
+    https://github.com/GarrettHoffman/lstm-oreilly
+    """
+    lstms = [tf.contrib.rnn.BasicLSTMCell(sz) for sz in lstm_sizes]
+    drops = [tf.contrib.rnn.DropoutWrapper(lstm, output_keep_prob=keep_prob) for lstm in lstms]
+    cell = tf.contrib.rnn.MultiRNNCell(drops)
+    batch_size = tf.shape(x)[0]
+    initial_state = cell.zero_state(batch_size, tf.float32)
 
-# Train and test.
-def get_dataset(features, labels, num_classes, batch_size, evaluation=False, buffer_size=5000):
-    """
-    Get the dataset object for feeding into the model
-    
-    If batch_size==None, then one-hot encode but don't batch (evaluation)
-    If batch_size!=None, then repeat, shuffle, and batch (training)
-    """
-    def map_func(x, y):
-        """ One-hot encode y, convert to appropriate data types """
-        x_out = tf.cast(tf.expand_dims(x,axis=1), tf.float32)
-        y_out = tf.one_hot(tf.squeeze(tf.cast(y, tf.uint8)) - 1, depth=num_classes)
-        return [x_out, y_out]
-    
-    dataset = tf.data.Dataset.from_tensor_slices((features, labels))
-    dataset = dataset.map(map_func)
-    
-    if evaluation:
-        dataset = dataset.batch(batch_size)
-    else:
-        dataset = dataset.repeat().shuffle(buffer_size).batch(batch_size)
-    
-    return dataset
+    lstm_outputs, final_state = tf.nn.dynamic_rnn(cell, x, initial_state=initial_state)
 
-def get_model(time_steps, num_features, num_classes, layer_type):
-    """ Define RNN model """
-    if layer_type == 'lstm':
-        layer1 = tf.keras.layers.LSTM(128, return_sequences=True)
-        layer2 = tf.keras.layers.LSTM(128, return_sequences=False)
-    elif layer_type == 'rnn':
-        layer1 = tf.keras.layers.SimpleRNN(128, return_sequences=True)
-        layer2 = tf.keras.layers.SimpleRNN(128, return_sequences=False)
-    elif layer_type == 'custom_rnn':
-        layer1 = tf.keras.layers.RNN(MinimalRNNCell(128), return_sequences=True)
-        layer2 = tf.keras.layers.RNN(MinimalRNNCell(128), return_sequences=False)
-    elif layer_type == 'vrnn':
-        layer1 = tf.keras.layers.RNN(VRNNCell(num_features, 64, 10),
-                                     return_sequences=False, return_state=True)
-        # Note: loss when stacking these gets weird.... we're generating an intermediate
-        # value meaning we don't have groundtruth for computing the loss. Thus, we'll only
-        # have one layer for VRNN and the output is one-hot encoded.
-    elif layer_type == 'gru':
-        layer1 = tf.keras.layers.GRU(128, return_sequences=True)
-        layer2 = tf.keras.layers.GRU(128, return_sequences=False)
-    
-    x = tf.keras.Input((time_steps,1), dtype=tf.float32)
-    
-    if layer_type == 'vrnn':
-        n, _, _, *vrnn_state = layer1(x)
-        #n = tf.keras.layers.Dropout(0.2)(n)
-        n = tf.keras.layers.Dense(num_classes)(n)
-        y = tf.keras.layers.Activation('softmax')(n)
-        model = tf.keras.Model(x, y)
-        
-        model.compile(loss=vrnn_loss(*vrnn_state, x),
-                      optimizer=tf.keras.optimizers.Adam(),
-                      metrics=['accuracy'])
-    else:
-        n = layer1(x)
-        n = tf.keras.layers.Dropout(0.5)(n)
-        n = layer2(n)
-        n = tf.keras.layers.Dropout(0.5)(n)
-        n = tf.keras.layers.Dense(num_classes)(n)
-        y = tf.keras.layers.Activation('softmax')(n)
-        model = tf.keras.Model(x, y)
-        
-        model.compile(loss=tf.keras.losses.categorical_crossentropy,
-                      optimizer=tf.keras.optimizers.Adam(),
-                      metrics=['accuracy'])
-    
-    return model
+    return initial_state, lstm_outputs, cell, final_state
 
-def latest_checkpoint(model_file):
-    """
-    Find latest checkpoint
-    https://www.tensorflow.org/tutorials/keras/save_and_restore_models
-    """
-    model_path = os.path.dirname(model_file)
-    checkpoints = pathlib.Path(model_path).glob("*.hdf5")
-    checkpoints = sorted(checkpoints, key=lambda cp:cp.stat().st_mtime)
-    checkpoints = [cp.with_suffix('.hdf5') for cp in checkpoints]
-    
-    if len(checkpoints) > 0:
-        # Get epoch number from filename
-        regex = re.compile(r'\d\d+')
-        numbers = [int(x) for x in regex.findall(str(checkpoints[-1]))]
-        assert len(numbers) == 1, "Could not determine epoch number from filename since multiple numbers"
-        epoch = numbers[0]
-        
-        return str(checkpoints[-1]), epoch
-    
-    return None, None
+def lstm_model(x, keep_prob, num_classes):
+    """ Create model """
+    # Build the LSTM
+    initial_state, lstm_outputs, lstm_cell, final_state = \
+            build_lstm(x, keep_prob, [128, 128])
+
+    # Pass result to fully connected then softmax to get class prediction
+    yhat = tf.contrib.layers.fully_connected(
+            lstm_outputs[:, -1], num_classes, activation_fn=tf.nn.softmax)
+
+    return yhat
 
 def train(data_info, features, labels,
-          batch_size=64,
-          num_epochs=5,
-          model_file="models/{epoch:04d}.hdf5",
-          log_dir="logs",
-          layer_type="lstm"):
-    
-    model_path = os.path.dirname(model_file)
-    if not os.path.exists(model_path):
-        os.makedirs(model_path)
-    latest, epoch = latest_checkpoint(model_file)
+        features_test, labels_test,
+        batch_size=64,
+        num_steps=1000,
+        num_eval=20,
+        model_dir="models",
+        log_dir="logs",
+        model_save_steps=100,
+        log_save_steps=1):
+
+    if not os.path.exists(model_dir):
+        os.makedirs(model_dir)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
 
     # Data stats
     time_steps, num_features, num_classes = data_info
 
-    # Get dataset / model
-    dataset = get_dataset(features, labels, num_classes, batch_size)
-    
-    # Load previous weights if found, if not we'll start at epoch 0
-    if latest is not None:
-        # Load the entire saved model
-        #model = tf.keras.models.load_model(latest, custom_objects={
-        #    'MinimalRNNCell': MinimalRNNCell,
-        #    'VRNNCell': VRNNCell,
-        #})
-        
-        # Alternatively, recreate model and load only the weights from the model file
-        model = get_model(time_steps, num_features, num_classes, layer_type)
-        model.load_weights(latest)
-    else:
-        model = get_model(time_steps, num_features, num_classes, layer_type)
-        epoch = 0
-    
-    # Train
-    model.fit(dataset, initial_epoch=epoch, epochs=num_epochs, steps_per_epoch=30, callbacks=[
-        # save_weights_only doesn't work for LSTM apparently, the just-trained model.get_weights()
-        # don't show up in the model-from-saved-file model.get_weights(), though some are loaded
-        # like the last dense layer. This is a saving problem definitely since saving the entire
-        # model and then loading just the weights works fine.
-        tf.keras.callbacks.ModelCheckpoint(model_file, period=1, verbose=0),
-        tf.keras.callbacks.TensorBoard(log_dir),
-        tf.keras.callbacks.TerminateOnNaN()
+    # Input training data and noise
+    input_fn, input_hook = _get_input_fn(features, labels, batch_size)
+    next_data_batch, next_labels_batch = input_fn()
+
+    # Load all the test data in one batch (we'll assume test set is small for now)
+    eval_input_fn, eval_input_hook = _get_input_fn(
+            features_test, labels_test, features_test.shape[0], evaluation=True)
+    next_data_batch_test, next_labels_batch_test = eval_input_fn()
+
+    # Inputs
+    keep_prob = tf.placeholder_with_default(1.0, shape=())
+    x = tf.placeholder(tf.float32, [None, time_steps, num_features], name='x')
+    y = tf.placeholder(tf.float32, [None, num_classes], name='y')
+
+    # Model
+    yhat = lstm_model(x, keep_prob, num_classes)
+
+    # Loss
+    loss = tf.nn.softmax_cross_entropy_with_logits_v2(labels=y, logits=yhat)
+
+    # Accuracy -- https://stackoverflow.com/a/42608050/2698494
+    accuracy = tf.reduce_mean(tf.cast(
+        tf.equal(tf.argmax(y, axis=-1), tf.argmax(yhat, axis=-1)),
+    tf.float32))
+
+    # Optimizer
+    optimizer = tf.train.AdamOptimizer().minimize(loss)
+
+    # Summaries
+    training_summaries = tf.summary.merge([
+        tf.summary.scalar("loss", tf.reduce_mean(loss)),
+        tf.summary.scalar("training_accuracy", accuracy)
     ])
-    
-    return model
+    evaluation_summaries = tf.summary.merge([
+        tf.summary.scalar("validation_accuracy", accuracy)
+    ])
 
-def evaluate(data_info, features, labels, model=None,
-             model_file="models/{epoch:04d}.hdf5",
-             layer_type="lstm",
-             useTensorFlowDataset=False):
-    
-    latest, epoch = latest_checkpoint(model_file)
-    
-    # Data stats
-    time_steps, num_features, num_classes = data_info
-    
-    # Get dataset
-    if useTensorFlowDataset:
-        dataset = get_dataset(features, labels, num_classes, 1, evaluation=True)
-    else:
-        x = np.expand_dims(features,axis=2).astype(np.float32)
-        y = np.eye(num_classes)[np.squeeze(labels).astype(np.uint8) - 1] # one-hot encode
-    
-    # Load weights from last checkpoint if model is not given
-    if model is None:
-        assert latest is not None, "No latest checkpoint to use for evaluation"
-        print("Loading model from", latest, "at epoch", epoch)
-        
-        # Load entire model
-        #model = tf.keras.models.load_model(latest, custom_objects={
-        #    'MinimalRNNCell': MinimalRNNCell,
-        #    'VRNNCell': VRNNCell,
-        #})
-        
-        # Alternatively, recreate model and load only the weights from the model file
-        model = get_model(time_steps, num_features, num_classes, layer_type)
-        model.load_weights(latest)
-    
-    # Evaluate
-    if useTensorFlowDataset:
-        loss, acc = model.evaluate(dataset, steps=len(labels))
-    else:
-        loss, acc = model.evaluate(x, y)
-    
-    return acc
+    # Allow restoring global_step from past run
+    global_step = tf.Variable(0, name="global_step", trainable=False)
+    inc_global_step = tf.assign_add(global_step, 1, name='incr_global_step')
+
+    # Keep track of state and summaries
+    saver = tf.train.Saver(max_to_keep=num_steps)
+    saver_hook = tf.train.CheckpointSaverHook(model_dir,
+            save_steps=model_save_steps, saver=saver)
+    writer = tf.summary.FileWriter(log_dir)
+
+    # Start training
+    with tf.train.SingularMonitoredSession(checkpoint_dir=model_dir,
+            hooks=[input_hook, eval_input_hook, saver_hook]) as sess:
+
+        # Get evaluation batch once
+        eval_data, eval_labels = sess.run([next_data_batch_test, next_labels_batch_test])
+
+        for i in range(sess.run(global_step),num_steps+1):
+            if i == 0:
+                writer.add_graph(sess.graph)
+
+            t = time.time()
+            data_batch, labels_batch = sess.run([next_data_batch, next_labels_batch])
+            _, step = sess.run([optimizer, inc_global_step],
+                    feed_dict={x: data_batch, y: labels_batch, keep_prob: 0.8})
+            t = time.time() - t
+
+            if i%log_save_steps == 0:
+                # Log the step time
+                summ = tf.Summary(value=[tf.Summary.Value(tag="step_time", simple_value=t)])
+                writer.add_summary(summ, step)
+
+                # Log summaries run on the training data
+                summ = sess.run(training_summaries,
+                        feed_dict={x: data_batch, y: labels_batch, keep_prob: 1.0})
+                writer.add_summary(summ, step)
+
+                # Log summaries run on the evaluation/validation data
+                summ = sess.run(evaluation_summaries,
+                        feed_dict={x: eval_data, y: eval_labels, keep_prob: 1.0})
+                writer.add_summary(summ, step)
+
+                # Log image summary
+                #randoms = [np.random.normal(0, 1, n_latent) for _ in range(batch_size)]
+                #summ = sess.run(image_summary,
+                #        feed_dict={sampled_z: randoms, keep_prob: 1.0})
+                #writer.add_summary(summ, step)
+
+                writer.flush()
+
+        writer.flush()
 
 if __name__ == '__main__':
+    # Used when training on Kamiak
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--modeldir', default="models", type=str, help="Directory for saving model files")
+    parser.add_argument('--logdir', default="logs", type=str, help="Directory for saving log files")
+    parser.add_argument('--eval', default=20, type=int, help="Number of images to use for evaluation")
+    args = parser.parse_args()
+
+    # Load dataset
     train_data, train_labels = load_data("trivial/positive_slope_TRAIN")
     test_data, test_labels = load_data("trivial/positive_slope_TEST")
 
     # Information about dataset
-    num_features = 1
+    num_features = 1 # e.g. trivial & Plane datasets only have one feature per time step
     time_steps = train_data.shape[1]
     num_classes = len(np.unique(train_labels))
     data_info = (time_steps, num_features, num_classes)
 
-    for layer_type in ['lstm', 'rnn', 'gru', 'custom_rnn', 'vrnn']:
-        print("Training model:", layer_type)
-        tf.reset_default_graph()
-        K.clear_session()
-        model = train(data_info, train_data, train_labels,
-                      model_file=layer_type+"-models/{epoch:04d}.hdf5",
-                      log_dir=layer_type+"-logs", layer_type=layer_type)
+    # One-hot encoding
+    train_data, train_labels = one_hot(train_data, train_labels, num_classes)
+    test_data, test_labels = one_hot(test_data, test_labels, num_classes)
 
-    for layer_type in ['lstm', 'rnn', 'gru', 'custom_rnn', 'vrnn']:
-        print("Evaluating model:", layer_type)
-        print("  Train:", evaluate(data_info, train_data, train_labels,
-                                   model_file=layer_type+"-models/{epoch:04d}.hdf5",
-                                   layer_type=layer_type))
-        print("  Test:", evaluate(data_info, test_data, test_labels,
-                                  model_file=layer_type+"-models/{epoch:04d}.hdf5",
-                                  layer_type=layer_type))
+    # Train and evaluate
+    train(data_info, train_data, train_labels,
+            test_data, test_labels,
+            num_eval=args.eval,
+            model_dir=args.modeldir,
+            log_dir=args.logdir)

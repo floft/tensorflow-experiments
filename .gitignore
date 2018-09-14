@@ -1,6 +1,6 @@
 *.gz
 *.zip
-*model/
+*model*/
 *log*/
 .ipynb_checkpoints/
 Plane/
