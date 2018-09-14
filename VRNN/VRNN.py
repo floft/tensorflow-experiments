@@ -2,6 +2,9 @@
 #
 # VRNN
 #
+# For VAE aspect of VRNNs, great explanation:
+# https://www.youtube.com/watch?v=uaaqyVS9-rM
+#
 import os
 import time
 import argparse
@@ -82,16 +85,8 @@ def one_hot(x, y, num_classes):
 #  - https://github.com/phreeza/tensorflow-vrnn/blob/master/model_vrnn.py
 #  - https://github.com/kimkilho/tensorflow-vrnn/blob/master/cell.py
 #  - https://github.com/kimkilho/tensorflow-vrnn/blob/master/main.py
-class VRNNCell(tf.keras.layers.Layer):
-    """
-    VRNN cell
-
-    Usage:
-        cell = VRNNCell(x_dim, h_dim, z_dim, batch_size)
-        net = tf.keras.layers.RNN(cell)(net)
-
-    Note: probably want to use vrnn_loss though, otherwise this performs terrible.
-    """
+#  - https://github.com/tensorflow/tensorflow/blob/r1.10/tensorflow/python/ops/rnn_cell_impl.py
+class VRNNCell(tf.contrib.rnn.LayerRNNCell):
     def __init__(self, x_dim, h_dim, z_dim, **kwargs):
         # Dimensions of x input, hidden layers, latent variable (z)
         self.n_x = x_dim
@@ -108,8 +103,8 @@ class VRNNCell(tf.keras.layers.Layer):
         self.n_prior_hidden = z_dim
 
         # What cell we're going to use internally for the RNN
-        self.cell = tf.keras.layers.LSTMCell(self.n_h,
-             input_shape=(None, self.n_dec_hidden+self.n_z_1))
+        self.cell = tf.contrib.rnn.BasicLSTMCell(self.n_h)
+             #input_shape=(None, self.n_dec_hidden+self.n_z_1))
 
         super(VRNNCell, self).__init__(**kwargs)
 
@@ -123,67 +118,71 @@ class VRNNCell(tf.keras.layers.Layer):
 
     @property
     def output_size(self):
-        return self.n_h
+        """ LSTM output is h which is in [0] """
+        return (self.n_h, self.n_h,
+                self.n_z, self.n_z,
+                self.n_x, self.n_x,
+                self.n_z, self.n_z)
 
     def build(self, input_shape):
         # Input: previous hidden state
-        self.prior_h = self.add_weight(
-            shape=(self.n_h, self.n_prior_hidden), initializer='glorot_uniform', name='prior_hidden')
-        self.prior_mu = self.add_weight(
-            shape=(self.n_prior_hidden, self.n_z), initializer='glorot_uniform', name='prior_mu')
-        self.prior_sigma = self.add_weight(
-            shape=(self.n_prior_hidden, self.n_z), initializer='glorot_uniform', name='prior_sigma')
+        self.prior_h = self.add_variable('prior/hidden/weights',
+            shape=(self.n_h, self.n_prior_hidden), initializer=tf.glorot_uniform_initializer())
+        self.prior_mu = self.add_variable('prior/mu/weights',
+            shape=(self.n_prior_hidden, self.n_z), initializer=tf.glorot_uniform_initializer())
+        self.prior_sigma = self.add_variable('prior/sigma/weights',
+            shape=(self.n_prior_hidden, self.n_z), initializer=tf.glorot_uniform_initializer())
 
-        self.prior_h_b = self.add_weight(
-            shape=(self.n_prior_hidden,), initializer='constant', name='prior_hidden_b')
-        self.prior_mu_b = self.add_weight(
-            shape=(self.n_z,), initializer='constant', name='prior_mu_b')
-        self.prior_sigma_b = self.add_weight(
-            shape=(self.n_z,), initializer='constant', name='prior_sigma_b')
+        self.prior_h_b = self.add_variable('prior/hidden/bias',
+            shape=(self.n_prior_hidden,), initializer=tf.constant_initializer())
+        self.prior_mu_b = self.add_variable('prior/mu/bias',
+            shape=(self.n_z,), initializer=tf.constant_initializer())
+        self.prior_sigma_b = self.add_variable('prior/sigma/bias',
+            shape=(self.n_z,), initializer=tf.constant_initializer())
 
         # Input: x
-        self.x_1 = self.add_weight(
-            shape=(self.n_x, self.n_x_1), initializer='glorot_uniform', name='phi_x')
+        self.x_1 = self.add_variable('phi_x/weights',
+            shape=(self.n_x, self.n_x_1), initializer=tf.glorot_uniform_initializer())
 
-        self.x_1_b = self.add_weight(
-            shape=(self.n_x_1,), initializer='constant', name='phi_x_b')
+        self.x_1_b = self.add_variable('phi_x/bias',
+            shape=(self.n_x_1,), initializer=tf.constant_initializer())
 
         # Input: x and previous hidden state
-        self.encoder_h = self.add_weight(
-            shape=(self.n_x_1+self.n_h, self.n_enc_hidden), initializer='glorot_uniform', name='encoder_hidden')
-        self.encoder_mu = self.add_weight(
-            shape=(self.n_enc_hidden, self.n_z), initializer='glorot_uniform', name='encoder_mu')
-        self.encoder_sigma = self.add_weight(
-            shape=(self.n_enc_hidden, self.n_z), initializer='glorot_uniform', name='encoder_sigma')
+        self.encoder_h = self.add_variable('encoder/hidden/weights',
+            shape=(self.n_x_1+self.n_h, self.n_enc_hidden), initializer=tf.glorot_uniform_initializer())
+        self.encoder_mu = self.add_variable('encoder/mu/weights',
+            shape=(self.n_enc_hidden, self.n_z), initializer=tf.glorot_uniform_initializer())
+        self.encoder_sigma = self.add_variable('encoder/sigma/weights',
+            shape=(self.n_enc_hidden, self.n_z), initializer=tf.glorot_uniform_initializer())
 
-        self.encoder_h_b = self.add_weight(
-            shape=(self.n_enc_hidden,), initializer='constant', name='encoder_hidden_b')
-        self.encoder_mu_b = self.add_weight(
-            shape=(self.n_z,), initializer='constant', name='encoder_mu_b')
-        self.encoder_sigma_b = self.add_weight(
-            shape=(self.n_z,), initializer='constant', name='encoder_sigma_b')
+        self.encoder_h_b = self.add_variable('encoder/hidden/bias',
+            shape=(self.n_enc_hidden,), initializer=tf.constant_initializer())
+        self.encoder_mu_b = self.add_variable('encoder/mu/bias',
+            shape=(self.n_z,), initializer=tf.constant_initializer())
+        self.encoder_sigma_b = self.add_variable('encoder/sigma/bias',
+            shape=(self.n_z,), initializer=tf.constant_initializer())
 
         # Input: z = enc_sigma*eps + enc_mu -- i.e. reparameterization trick
-        self.z_1 = self.add_weight(
-            shape=(self.n_z, self.n_z_1), initializer='glorot_uniform', name='phi_z')
+        self.z_1 = self.add_variable('phi_z/weights',
+            shape=(self.n_z, self.n_z_1), initializer=tf.glorot_uniform_initializer())
 
-        self.z_1_b = self.add_weight(
-            shape=(self.n_z_1,), initializer='constant', name='phi_z_b')
+        self.z_1_b = self.add_variable('phi_z/bias',
+            shape=(self.n_z_1,), initializer=tf.constant_initializer())
 
         # Input: latent variable (z) and previous hidden state
-        self.decoder_h = self.add_weight(
-            shape=(self.n_z+self.n_h, self.n_dec_hidden), initializer='glorot_uniform', name='decoder_hidden')
-        self.decoder_mu = self.add_weight(
-            shape=(self.n_dec_hidden, self.n_x), initializer='glorot_uniform', name='decoder_mu')
-        self.decoder_sigma = self.add_weight(
-            shape=(self.n_dec_hidden, self.n_x), initializer='glorot_uniform', name='decoder_sigma')
+        self.decoder_h = self.add_variable('decoder/hidden/weights',
+            shape=(self.n_z+self.n_h, self.n_dec_hidden), initializer=tf.glorot_uniform_initializer())
+        self.decoder_mu = self.add_variable('decoder/mu/weights',
+            shape=(self.n_dec_hidden, self.n_x), initializer=tf.glorot_uniform_initializer())
+        self.decoder_sigma = self.add_variable('decoder/sigma/weights',
+            shape=(self.n_dec_hidden, self.n_x), initializer=tf.glorot_uniform_initializer())
 
-        self.decoder_h_b = self.add_weight(
-            shape=(self.n_dec_hidden,), initializer='constant', name='decoder_hidden_b')
-        self.decoder_mu_b = self.add_weight(
-            shape=(self.n_x,), initializer='constant', name='decoder_mu_b')
-        self.decoder_sigma_b = self.add_weight(
-            shape=(self.n_x,), initializer='constant', name='decoder_sigma_b')
+        self.decoder_h_b = self.add_variable('decoder/hidden/bias',
+            shape=(self.n_dec_hidden,), initializer=tf.constant_initializer())
+        self.decoder_mu_b = self.add_variable('decoder/mu/bias',
+            shape=(self.n_x,), initializer=tf.constant_initializer())
+        self.decoder_sigma_b = self.add_variable('decoder/sigma/bias',
+            shape=(self.n_x,), initializer=tf.constant_initializer())
 
         super(VRNNCell, self).build(input_shape)
 
@@ -192,49 +191,40 @@ class VRNNCell(tf.keras.layers.Layer):
         h = states[0]
         c = states[1] # only passed to the LSTM
 
-        # Determine if training
-        if training is None:
-            training = K.learning_phase()
-
         # Input: previous hidden state (h)
-        prior_h = K.relu(K.dot(h, self.prior_h) + self.prior_h_b)
-        #prior_h = K.dot(h, self.prior_h) + self.prior_h_b # Linear
-        prior_mu = K.dot(prior_h, self.prior_mu) + self.prior_mu_b
-        prior_sigma = K.softplus(K.dot(prior_h, self.prior_sigma) + self.prior_sigma_b) # >= 0
+        prior_h = tf.nn.relu(tf.matmul(h, self.prior_h) + self.prior_h_b)
+        #prior_h = tf.matmul(h, self.prior_h) + self.prior_h_b # Linear
+        prior_mu = tf.matmul(prior_h, self.prior_mu) + self.prior_mu_b
+        prior_sigma = tf.nn.softplus(tf.matmul(prior_h, self.prior_sigma) + self.prior_sigma_b) # >= 0
 
         # Input: x
-        x_1 = K.relu(K.dot(inputs, self.x_1) + self.x_1_b) # >= 0
+        x_1 = tf.nn.relu(tf.matmul(inputs, self.x_1) + self.x_1_b) # >= 0
 
         # Input: x and previous hidden state
-        encoder_input = K.concatenate((x_1, h), 1)
-        encoder_h = K.relu(K.dot(encoder_input, self.encoder_h) + self.encoder_h_b)
-        #encoder_h = K.dot(encoder_input, self.encoder_h) + self.encoder_h_b # Linear
-        encoder_mu = K.dot(encoder_h, self.encoder_mu) + self.encoder_mu_b
-        encoder_sigma = K.softplus(K.dot(encoder_h, self.encoder_sigma) + self.encoder_sigma_b)
-
-        # If not training, just copy the prior?
-        # https://lirnli.wordpress.com/2017/09/27/variational-recurrent-neural-network-vrnn-with-pytorch/
-        #encoder_mu = tf.cond(training, lambda: encoder_mu,    lambda: prior_mu)
-        #encoder_mu = tf.cond(training, lambda: encoder_sigma, lambda: prior_sigma)
+        encoder_input = tf.concat((x_1, h), 1)
+        encoder_h = tf.nn.relu(tf.matmul(encoder_input, self.encoder_h) + self.encoder_h_b)
+        #encoder_h = tf.matmul(encoder_input, self.encoder_h) + self.encoder_h_b # Linear
+        encoder_mu = tf.matmul(encoder_h, self.encoder_mu) + self.encoder_mu_b
+        encoder_sigma = tf.nn.softplus(tf.matmul(encoder_h, self.encoder_sigma) + self.encoder_sigma_b)
 
         # Input: z = enc_sigma*eps + enc_mu -- i.e. reparameterization trick
-        batch_size = K.shape(inputs)[0] # https://github.com/tensorflow/tensorflow/issues/373
-        eps = K.random_normal((batch_size, self.n_z), dtype=tf.float32)
+        batch_size = tf.shape(inputs)[0] # https://github.com/tensorflow/tensorflow/issues/373
+        eps = tf.random_normal((batch_size, self.n_z), dtype=tf.float32)
         z = encoder_sigma*eps + encoder_mu
-        z_1 = K.relu(K.dot(z, self.z_1) + self.z_1_b)
+        z_1 = tf.nn.relu(tf.matmul(z, self.z_1) + self.z_1_b)
 
         # Input: latent variable (z) and previous hidden state
-        decoder_input = K.concatenate((z_1, h), 1)
-        decoder_h = K.relu(K.dot(decoder_input, self.decoder_h) + self.decoder_h_b)
-        #decoder_h = K.dot(decoder_input, self.decoder_h) + self.decoder_h_b # Linear
-        decoder_mu = K.dot(decoder_h, self.decoder_mu) + self.decoder_mu_b
-        decoder_sigma = K.softplus(K.dot(decoder_h, self.decoder_sigma) + self.decoder_sigma_b)
+        decoder_input = tf.concat((z_1, h), 1)
+        decoder_h = tf.nn.relu(tf.matmul(decoder_input, self.decoder_h) + self.decoder_h_b)
+        #decoder_h = tf.matmul(decoder_input, self.decoder_h) + self.decoder_h_b # Linear
+        decoder_mu = tf.matmul(decoder_h, self.decoder_mu) + self.decoder_mu_b
+        decoder_sigma = tf.nn.softplus(tf.matmul(decoder_h, self.decoder_sigma) + self.decoder_sigma_b)
 
         # Pass to cell (e.g. LSTM). Note that the LSTM has both "h" and "c" that are combined
         # into the same next state vector. We'll combine them together to pass in and split them
         # back out after the LSTM returns the next state.
-        rnn_cell_input = K.concatenate((x_1, z_1), 1)
-        output, (h_next, c_next) = self.cell(rnn_cell_input, [h, c])
+        rnn_cell_input = tf.concat((x_1, z_1), 1)
+        output, (c_next, h_next) = self.cell(rnn_cell_input, [c, h]) # Note: (h,c) in Keras (c,h) in contrib
 
         # VRNN state
         next_state = (
@@ -248,104 +238,117 @@ class VRNNCell(tf.keras.layers.Layer):
             prior_sigma,
         )
 
-        # TODO save the encoder mu/sigma for the entire history of time steps for the loss?
-        # TODO maybe save x and xhat to minimize difference?
+        #return output, next_state
+        return next_state, next_state
 
-        return output, next_state
-
-    def get_config(self):
-        """ Save cell config to the model file """
-        config = {
-            'x_dim': self.n_x,
-            'h_dim': self.n_h,
-            'z_dim': self.n_z,
-        }
-        base_config = super(VRNNCell, self).get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-
-
-# Then implementing the VRNN loss.
-def vrnn_loss(
-    encoder_mu, encoder_sigma,
-    decoder_mu, decoder_sigma,
-    prior_mu, prior_sigma, x):
+def build_rnn(x, keep_prob, layers):
     """
-    Returns function to compute VRNN loss
-
-    First 6 arguments are from the state of the VRNN. Also pass in x
-    since we're trying to make the decoder generate x.
-
-    Usage:
-        cell = VRNNCell(x_dim, h_dim, z_dim, batch_size)
-        vrnn_layer = tf.keras.layers.RNN(cell, return_state=True)
-        net, _, _, *vrnn_state = vrnn_layer(x)
-        y = ...
-        loss = vrnn_loss(*vrnn_state, x)
-    """
-
-    def loss_function(y_true, y_pred):
-        eps = 1e-9
-
-        # KL divergence
-        # https://stats.stackexchange.com/q/7440
-        # https://github.com/kimkilho/tensorflow-vrnn/blob/master/main.py
-        kl_loss = 0.5*tf.reduce_mean(
-                2*tf.log(tf.maximum(eps, prior_sigma)) - 2*tf.log(tf.maximum(eps, encoder_sigma))
-                + (tf.square(encoder_sigma) + tf.square(encoder_mu - prior_mu))
-                    / tf.maximum(eps, tf.square(prior_sigma))
-                - 1,
-            axis=1)
-
-        # Reshape [batch_size,time_steps,num_features] -> [batch_size*time_steps,num_features]
-        # so that (decoder_mu - x) will broadcast correctly
-        x_reshape = tf.transpose(x, [0, 2, 1])
-
-        # Negative log likelihood:
-        # https://papers.nips.cc/paper/7219-simple-and-scalable-predictive-uncertainty-estimation-using-deep-ensembles.pdf
-        # https://fairyonice.github.io/Create-a-neural-net-with-a-negative-log-likelihood-as-a-loss.html
-        likelihood_loss = 0.5*tf.reduce_mean(
-            tf.square(decoder_mu - x_reshape) / tf.maximum(eps, tf.square(decoder_sigma))
-            + tf.log(tf.maximum(eps, tf.square(decoder_sigma)))
-        )
-
-        # We'd also like to classify well
-        categorical_loss = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
-
-        return tf.reduce_mean(kl_loss + likelihood_loss + categorical_loss)
-    return loss_function
-
-def build_lstm(x, keep_prob, lstm_sizes):
-    """
-    Generate multi-layer LSTM
+    Multi-layer LSTM
     https://github.com/GarrettHoffman/lstm-oreilly
+
+    x, keep_prob - placeholders
+    layers - cell for each layer, e.g. [LSTMCell(...), LSTMCell(...), ...]
     """
-    lstms = [tf.contrib.rnn.BasicLSTMCell(sz) for sz in lstm_sizes]
-    drops = [tf.contrib.rnn.DropoutWrapper(lstm, output_keep_prob=keep_prob) for lstm in lstms]
+
+    drops = [tf.contrib.rnn.DropoutWrapper(l, output_keep_prob=keep_prob) for l in layers]
     cell = tf.contrib.rnn.MultiRNNCell(drops)
+
     batch_size = tf.shape(x)[0]
     initial_state = cell.zero_state(batch_size, tf.float32)
 
-    lstm_outputs, final_state = tf.nn.dynamic_rnn(cell, x, initial_state=initial_state)
+    outputs, final_state = tf.nn.dynamic_rnn(cell, x, initial_state=initial_state)
 
-    return initial_state, lstm_outputs, cell, final_state
+    return initial_state, outputs, cell, final_state
 
-def lstm_model(x, keep_prob, num_classes):
-    """ Create model """
+def lstm_model(x, y, keep_prob, num_classes, num_features):
+    """ Create an LSTM model as a baseline """
     # Build the LSTM
-    initial_state, lstm_outputs, lstm_cell, final_state = \
-            build_lstm(x, keep_prob, [128, 128])
+    initial_state, outputs, cell, final_state = build_rnn(x, keep_prob, [
+        #tf.contrib.rnn.BasicLSTMCell(128), tf.contrib.rnn.BasicLSTMCell(128),
+        tf.contrib.rnn.BasicLSTMCell(128),
+    ])
 
-    # Pass result to fully connected then softmax to get class prediction
+    # Pass last output to fully connected then softmax to get class prediction
     yhat = tf.contrib.layers.fully_connected(
-            lstm_outputs[:, -1], num_classes, activation_fn=tf.nn.softmax)
+            outputs[:, -1], num_classes, activation_fn=tf.nn.softmax)
 
-    return yhat
+    # Loss
+    loss = tf.nn.softmax_cross_entropy_with_logits_v2(labels=y, logits=yhat)
+
+    return yhat, loss, []
+
+def vrnn_model(x, y, keep_prob, num_classes, num_features, eps=1e-6):
+    """ Create the VRNN model """
+    #
+    # Model
+    #
+    with tf.variable_scope("rnn_model"):
+        initial_state, outputs, cell, final_state = build_rnn(x, keep_prob, [
+            #VRNNCell(num_features, 128, 64), VRNNCell(128, 128, 64), # h_dim of l_i must be num_features of l_(i+1)
+            VRNNCell(num_features, 128, 64),
+        ])
+
+    h, c, \
+    encoder_mu, encoder_sigma, \
+    decoder_mu, decoder_sigma, \
+    prior_mu, prior_sigma, \
+        = outputs # TODO if multiple layers maybe do loss for each of these
+
+    with tf.variable_scope("classifier"):
+        # Pass last output to fully connected then softmax to get class prediction
+        yhat = tf.contrib.layers.fully_connected(
+                h[:, -1], num_classes, activation_fn=tf.nn.softmax) # h is the LSTM output
+
+    #
+    # Loss
+    #
+    # KL divergence
+    # https://stats.stackexchange.com/q/7440
+    # https://github.com/kimkilho/tensorflow-vrnn/blob/master/main.py
+    with tf.variable_scope("kl_gaussian"):
+        kl_loss = tf.reduce_mean(tf.reduce_mean(
+                tf.log(tf.maximum(eps, prior_sigma)) - tf.log(tf.maximum(eps, encoder_sigma))
+                + 0.5*(tf.square(encoder_sigma) + tf.square(encoder_mu - prior_mu))
+                    / tf.maximum(eps, tf.square(prior_sigma))
+                - 0.5,
+            axis=1), axis=1)
+
+    # Reshape [batch_size,time_steps,num_features] -> [batch_size*time_steps,num_features]
+    # so that (decoder_mu - x) will broadcast correctly
+    #x_transpose = tf.transpose(x, [0, 2, 1])
+    #decoder_mu_reshape = tf.reshape(decoder_mu, [tf.shape(decoder_mu)[0]*tf.shape(decoder_mu)[1], tf.shape(decoder_mu)[2]])
+    #x_reshape = tf.reshape(x, [tf.shape(x)[0]*tf.shape(x)[1], tf.shape(x)[2]])
+
+    # Negative log likelihood:
+    # https://papers.nips.cc/paper/7219-simple-and-scalable-predictive-uncertainty-estimation-using-deep-ensembles.pdf
+    # https://fairyonice.github.io/Create-a-neural-net-with-a-negative-log-likelihood-as-a-loss.html
+    with tf.variable_scope("negative_log_likelihood"):
+        likelihood_loss = 0.5*tf.reduce_mean(tf.reduce_mean(
+            tf.square(decoder_mu - x) / tf.maximum(eps, tf.square(decoder_sigma))
+            + tf.log(tf.maximum(eps, tf.square(decoder_sigma))),
+        axis=1), axis=1)
+
+    # We'd also like to classify well
+    categorical_loss = tf.nn.softmax_cross_entropy_with_logits_v2(labels=y, logits=yhat)
+
+    loss = tf.reduce_mean(kl_loss + likelihood_loss + categorical_loss)
+
+    #
+    # Extra summaries
+    #
+    summaries = [
+        tf.summary.scalar("loss/kl", tf.reduce_mean(kl_loss)),
+        tf.summary.scalar("loss/likelihood", tf.reduce_mean(likelihood_loss)),
+        tf.summary.scalar("loss/categorical", tf.reduce_mean(categorical_loss)),
+    ]
+
+    return yhat, loss, summaries
 
 def train(data_info, features, labels,
         features_test, labels_test,
+        model_func=lstm_model,
         batch_size=64,
         num_steps=1000,
-        num_eval=20,
         model_dir="models",
         log_dir="logs",
         model_save_steps=100,
@@ -373,11 +376,10 @@ def train(data_info, features, labels,
     x = tf.placeholder(tf.float32, [None, time_steps, num_features], name='x')
     y = tf.placeholder(tf.float32, [None, num_classes], name='y')
 
-    # Model
-    yhat = lstm_model(x, keep_prob, num_classes)
-
-    # Loss
-    loss = tf.nn.softmax_cross_entropy_with_logits_v2(labels=y, logits=yhat)
+    # Model and loss -- e.g. lstm_model
+    #
+    # Optionally also returns additional summaries to log, e.g. loss components
+    yhat, loss, model_summaries = model_func(x, y, keep_prob, num_classes, num_features)
 
     # Accuracy -- https://stackoverflow.com/a/42608050/2698494
     accuracy = tf.reduce_mean(tf.cast(
@@ -389,11 +391,11 @@ def train(data_info, features, labels,
 
     # Summaries
     training_summaries = tf.summary.merge([
-        tf.summary.scalar("loss", tf.reduce_mean(loss)),
-        tf.summary.scalar("training_accuracy", accuracy)
-    ])
+        tf.summary.scalar("loss/total_loss", tf.reduce_mean(loss)),
+        tf.summary.scalar("accuracy/training", accuracy)
+    ]+model_summaries)
     evaluation_summaries = tf.summary.merge([
-        tf.summary.scalar("validation_accuracy", accuracy)
+        tf.summary.scalar("accuracy/validation", accuracy)
     ])
 
     # Allow restoring global_step from past run
@@ -438,12 +440,6 @@ def train(data_info, features, labels,
                         feed_dict={x: eval_data, y: eval_labels, keep_prob: 1.0})
                 writer.add_summary(summ, step)
 
-                # Log image summary
-                #randoms = [np.random.normal(0, 1, n_latent) for _ in range(batch_size)]
-                #summ = sess.run(image_summary,
-                #        feed_dict={sampled_z: randoms, keep_prob: 1.0})
-                #writer.add_summary(summ, step)
-
                 writer.flush()
 
         writer.flush()
@@ -453,7 +449,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--modeldir', default="models", type=str, help="Directory for saving model files")
     parser.add_argument('--logdir', default="logs", type=str, help="Directory for saving log files")
-    parser.add_argument('--eval', default=20, type=int, help="Number of images to use for evaluation")
     args = parser.parse_args()
 
     # Load dataset
@@ -470,9 +465,20 @@ if __name__ == '__main__':
     train_data, train_labels = one_hot(train_data, train_labels, num_classes)
     test_data, test_labels = one_hot(test_data, test_labels, num_classes)
 
-    # Train and evaluate
+    # Train and evaluate LSTM
+    """
     train(data_info, train_data, train_labels,
             test_data, test_labels,
-            num_eval=args.eval,
-            model_dir=args.modeldir,
-            log_dir=args.logdir)
+            model_func=lstm_model,
+            model_dir="lstm-models",
+            log_dir="lstm-logs")
+    """
+
+    # Train and evaluate VRNN
+    train(data_info, train_data, train_labels,
+            test_data, test_labels,
+            model_func=vrnn_model,
+            model_dir="vrnn-models",
+            log_dir="vrnn-logs")
+            #model_dir=args.modeldir,
+            #log_dir=args.logdir)
