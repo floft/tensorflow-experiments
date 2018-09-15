@@ -130,6 +130,9 @@ class VRNNCell(tf.contrib.rnn.LayerRNNCell):
                 self.n_x_1, self.n_z_1)
 
     def build(self, input_shape):
+        # TODO grab input size from input_shape rather than passing in
+        # num_features to the constructor
+
         # Input: previous hidden state
         self.prior_h = self.add_variable('prior/hidden/weights',
             shape=(self.n_h, self.n_prior_hidden), initializer=tf.glorot_uniform_initializer())
@@ -321,6 +324,12 @@ def vrnn_model(x, y, keep_prob, training, num_classes, num_features, eps=1e-9):
             #VRNNCell(num_features, 128, 64), VRNNCell(128, 128, 64), # h_dim of l_i must be num_features of l_(i+1)
             VRNNCell(num_features, 128, 10, training, batch_norm=False),
         ])
+        # Note: if you try using more than one layer above, then you need to
+        # change the loss since for instance if you put an LSTM layer before
+        # the VRNN cell, then no longer is the input to the layer x as
+        # specified in the loss but now it's the output of the first LSTM layer
+        # that the VRNN layer should be learning how to reconstruct. Thus, for
+        # now I'll keep it simple and not have multiple layers.
 
     h, c, \
     encoder_mu, encoder_sigma, \
@@ -529,7 +538,7 @@ if __name__ == '__main__':
     train(data_info, train_data, train_labels,
             test_data, test_labels,
             model_func=vrnn_model,
-            model_dir="plane-test/vrnn10-models",
-            log_dir="plane-test/vrnn10-logs")
+            model_dir="plane-test/vrnn12-models",
+            log_dir="plane-test/vrnn12-logs")
             #model_dir=args.modeldir,
             #log_dir=args.logdir)
