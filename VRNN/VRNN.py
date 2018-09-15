@@ -87,7 +87,10 @@ def one_hot(x, y, num_classes):
 #  - https://github.com/kimkilho/tensorflow-vrnn/blob/master/main.py
 #  - https://github.com/tensorflow/tensorflow/blob/r1.10/tensorflow/python/ops/rnn_cell_impl.py
 class VRNNCell(tf.contrib.rnn.LayerRNNCell):
-    def __init__(self, x_dim, h_dim, z_dim, **kwargs):
+    def __init__(self, x_dim, h_dim, z_dim, training, batch_norm=False, **kwargs):
+        self.batch_norm = batch_norm
+        self.training = training # placeholder for batch norm
+
         # Dimensions of x input, hidden layers, latent variable (z)
         self.n_x = x_dim
         self.n_h = h_dim
@@ -114,7 +117,8 @@ class VRNNCell(tf.contrib.rnn.LayerRNNCell):
         return (self.n_h, self.n_h,
                 self.n_z, self.n_z,
                 self.n_x, self.n_x,
-                self.n_z, self.n_z)
+                self.n_z, self.n_z,
+                self.n_x_1, self.n_z_1)
 
     @property
     def output_size(self):
@@ -122,7 +126,8 @@ class VRNNCell(tf.contrib.rnn.LayerRNNCell):
         return (self.n_h, self.n_h,
                 self.n_z, self.n_z,
                 self.n_x, self.n_x,
-                self.n_z, self.n_z)
+                self.n_z, self.n_z,
+                self.n_x_1, self.n_z_1)
 
     def build(self, input_shape):
         # Input: previous hidden state
@@ -133,19 +138,21 @@ class VRNNCell(tf.contrib.rnn.LayerRNNCell):
         self.prior_sigma = self.add_variable('prior/sigma/weights',
             shape=(self.n_prior_hidden, self.n_z), initializer=tf.glorot_uniform_initializer())
 
-        self.prior_h_b = self.add_variable('prior/hidden/bias',
-            shape=(self.n_prior_hidden,), initializer=tf.constant_initializer())
+        if not self.batch_norm:
+            self.prior_h_b = self.add_variable('prior/hidden/bias',
+                shape=(self.n_prior_hidden,), initializer=tf.constant_initializer())
+            self.prior_sigma_b = self.add_variable('prior/sigma/bias',
+                shape=(self.n_z,), initializer=tf.constant_initializer())
         self.prior_mu_b = self.add_variable('prior/mu/bias',
-            shape=(self.n_z,), initializer=tf.constant_initializer())
-        self.prior_sigma_b = self.add_variable('prior/sigma/bias',
             shape=(self.n_z,), initializer=tf.constant_initializer())
 
         # Input: x
         self.x_1 = self.add_variable('phi_x/weights',
             shape=(self.n_x, self.n_x_1), initializer=tf.glorot_uniform_initializer())
 
-        self.x_1_b = self.add_variable('phi_x/bias',
-            shape=(self.n_x_1,), initializer=tf.constant_initializer())
+        if not self.batch_norm:
+            self.x_1_b = self.add_variable('phi_x/bias',
+                shape=(self.n_x_1,), initializer=tf.constant_initializer())
 
         # Input: x and previous hidden state
         self.encoder_h = self.add_variable('encoder/hidden/weights',
@@ -155,19 +162,21 @@ class VRNNCell(tf.contrib.rnn.LayerRNNCell):
         self.encoder_sigma = self.add_variable('encoder/sigma/weights',
             shape=(self.n_enc_hidden, self.n_z), initializer=tf.glorot_uniform_initializer())
 
-        self.encoder_h_b = self.add_variable('encoder/hidden/bias',
-            shape=(self.n_enc_hidden,), initializer=tf.constant_initializer())
+        if not self.batch_norm:
+            self.encoder_h_b = self.add_variable('encoder/hidden/bias',
+                shape=(self.n_enc_hidden,), initializer=tf.constant_initializer())
+            self.encoder_sigma_b = self.add_variable('encoder/sigma/bias',
+                shape=(self.n_z,), initializer=tf.constant_initializer())
         self.encoder_mu_b = self.add_variable('encoder/mu/bias',
-            shape=(self.n_z,), initializer=tf.constant_initializer())
-        self.encoder_sigma_b = self.add_variable('encoder/sigma/bias',
             shape=(self.n_z,), initializer=tf.constant_initializer())
 
         # Input: z = enc_sigma*eps + enc_mu -- i.e. reparameterization trick
         self.z_1 = self.add_variable('phi_z/weights',
             shape=(self.n_z, self.n_z_1), initializer=tf.glorot_uniform_initializer())
 
-        self.z_1_b = self.add_variable('phi_z/bias',
-            shape=(self.n_z_1,), initializer=tf.constant_initializer())
+        if not self.batch_norm:
+            self.z_1_b = self.add_variable('phi_z/bias',
+                shape=(self.n_z_1,), initializer=tf.constant_initializer())
 
         # Input: latent variable (z) and previous hidden state
         self.decoder_h = self.add_variable('decoder/hidden/weights',
@@ -177,54 +186,76 @@ class VRNNCell(tf.contrib.rnn.LayerRNNCell):
         self.decoder_sigma = self.add_variable('decoder/sigma/weights',
             shape=(self.n_dec_hidden, self.n_x), initializer=tf.glorot_uniform_initializer())
 
-        self.decoder_h_b = self.add_variable('decoder/hidden/bias',
-            shape=(self.n_dec_hidden,), initializer=tf.constant_initializer())
+        if not self.batch_norm:
+            self.decoder_h_b = self.add_variable('decoder/hidden/bias',
+                shape=(self.n_dec_hidden,), initializer=tf.constant_initializer())
+            self.decoder_sigma_b = self.add_variable('decoder/sigma/bias',
+                shape=(self.n_x,), initializer=tf.constant_initializer())
         self.decoder_mu_b = self.add_variable('decoder/mu/bias',
-            shape=(self.n_x,), initializer=tf.constant_initializer())
-        self.decoder_sigma_b = self.add_variable('decoder/sigma/bias',
             shape=(self.n_x,), initializer=tf.constant_initializer())
 
         super(VRNNCell, self).build(input_shape)
 
-    def call(self, inputs, states, training=None):
+    def call(self, inputs, states):
         # Get relevant states
         h = states[0]
         c = states[1] # only passed to the LSTM
 
         # Input: previous hidden state (h)
-        prior_h = tf.nn.relu(tf.matmul(h, self.prior_h) + self.prior_h_b)
-        #prior_h = tf.matmul(h, self.prior_h) + self.prior_h_b # Linear
+        #
+        # Note: update_collections=None from https://github.com/tensorflow/tensorflow/issues/6087
+        # And, that's why I'm not using tf.layers.batch_normalization
+        if self.batch_norm:
+            prior_h = tf.nn.relu(tf.contrib.layers.batch_norm(tf.matmul(h, self.prior_h), is_training=self.training, updates_collections=None))
+            prior_sigma = tf.nn.softplus(tf.contrib.layers.batch_norm(tf.matmul(prior_h, self.prior_sigma), is_training=self.training, updates_collections=None)) # >= 0
+        else:
+            prior_h = tf.nn.relu(tf.matmul(h, self.prior_h) + self.prior_h_b)
+            prior_sigma = tf.nn.softplus(tf.matmul(prior_h, self.prior_sigma) + self.prior_sigma_b) # >= 0
         prior_mu = tf.matmul(prior_h, self.prior_mu) + self.prior_mu_b
-        prior_sigma = tf.nn.softplus(tf.matmul(prior_h, self.prior_sigma) + self.prior_sigma_b) # >= 0
 
         # Input: x
-        x_1 = tf.nn.relu(tf.matmul(inputs, self.x_1) + self.x_1_b) # >= 0
+        #
+        # Note: removed ReLU since in the dataset not all x values are positive
+        if self.batch_norm:
+            x_1 = tf.contrib.layers.batch_norm(tf.matmul(inputs, self.x_1), is_training=self.training, updates_collections=None)
+        else:
+            x_1 = tf.matmul(inputs, self.x_1) + self.x_1_b
 
         # Input: x and previous hidden state
         encoder_input = tf.concat((x_1, h), 1)
-        encoder_h = tf.nn.relu(tf.matmul(encoder_input, self.encoder_h) + self.encoder_h_b)
-        #encoder_h = tf.matmul(encoder_input, self.encoder_h) + self.encoder_h_b # Linear
+        if self.batch_norm:
+            encoder_h = tf.nn.relu(tf.contrib.layers.batch_norm(tf.matmul(encoder_input, self.encoder_h), is_training=self.training, updates_collections=None))
+            encoder_sigma = tf.nn.softplus(tf.contrib.layers.batch_norm(tf.matmul(encoder_h, self.encoder_sigma), is_training=self.training, updates_collections=None))
+        else:
+            encoder_h = tf.nn.relu(tf.matmul(encoder_input, self.encoder_h) + self.encoder_h_b)
+            encoder_sigma = tf.nn.softplus(tf.matmul(encoder_h, self.encoder_sigma) + self.encoder_sigma_b)
         encoder_mu = tf.matmul(encoder_h, self.encoder_mu) + self.encoder_mu_b
-        encoder_sigma = tf.nn.softplus(tf.matmul(encoder_h, self.encoder_sigma) + self.encoder_sigma_b)
 
         # Input: z = enc_sigma*eps + enc_mu -- i.e. reparameterization trick
         batch_size = tf.shape(inputs)[0] # https://github.com/tensorflow/tensorflow/issues/373
         eps = tf.random_normal((batch_size, self.n_z), dtype=tf.float32)
         z = encoder_sigma*eps + encoder_mu
-        z_1 = tf.nn.relu(tf.matmul(z, self.z_1) + self.z_1_b)
+        if self.batch_norm:
+            z_1 = tf.nn.relu(tf.contrib.layers.batch_norm(tf.matmul(z, self.z_1), is_training=self.training, updates_collections=None))
+        else:
+            z_1 = tf.nn.relu(tf.matmul(z, self.z_1) + self.z_1_b)
 
         # Input: latent variable (z) and previous hidden state
         decoder_input = tf.concat((z_1, h), 1)
-        decoder_h = tf.nn.relu(tf.matmul(decoder_input, self.decoder_h) + self.decoder_h_b)
-        #decoder_h = tf.matmul(decoder_input, self.decoder_h) + self.decoder_h_b # Linear
+        if self.batch_norm:
+            decoder_h = tf.nn.relu(tf.contrib.layers.batch_norm(tf.matmul(decoder_input, self.decoder_h), is_training=self.training, updates_collections=None))
+            decoder_sigma = tf.nn.softplus(tf.contrib.layers.batch_norm(tf.matmul(decoder_h, self.decoder_sigma), is_training=self.training, updates_collections=None))
+        else:
+            decoder_h = tf.nn.relu(tf.matmul(decoder_input, self.decoder_h) + self.decoder_h_b)
+            decoder_sigma = tf.nn.softplus(tf.matmul(decoder_h, self.decoder_sigma) + self.decoder_sigma_b)
         decoder_mu = tf.matmul(decoder_h, self.decoder_mu) + self.decoder_mu_b
-        decoder_sigma = tf.nn.softplus(tf.matmul(decoder_h, self.decoder_sigma) + self.decoder_sigma_b)
 
         # Pass to cell (e.g. LSTM). Note that the LSTM has both "h" and "c" that are combined
         # into the same next state vector. We'll combine them together to pass in and split them
         # back out after the LSTM returns the next state.
         rnn_cell_input = tf.concat((x_1, z_1), 1)
         output, (c_next, h_next) = self.cell(rnn_cell_input, [c, h]) # Note: (h,c) in Keras (c,h) in contrib
+        #output, (h_next, c_next) = self.cell(rnn_cell_input, [h, c]) # Note: (h,c) in Keras (c,h) in contrib
 
         # VRNN state
         next_state = (
@@ -236,6 +267,8 @@ class VRNNCell(tf.contrib.rnn.LayerRNNCell):
             decoder_sigma,
             prior_mu,
             prior_sigma,
+            x_1,
+            z_1,
         )
 
         #return output, next_state
@@ -260,13 +293,14 @@ def build_rnn(x, keep_prob, layers):
 
     return initial_state, outputs, cell, final_state
 
-def lstm_model(x, y, keep_prob, num_classes, num_features):
+def lstm_model(x, y, keep_prob, training, num_classes, num_features):
     """ Create an LSTM model as a baseline """
     # Build the LSTM
-    initial_state, outputs, cell, final_state = build_rnn(x, keep_prob, [
-        #tf.contrib.rnn.BasicLSTMCell(128), tf.contrib.rnn.BasicLSTMCell(128),
-        tf.contrib.rnn.BasicLSTMCell(128),
-    ])
+    with tf.variable_scope("rnn_model"):
+        initial_state, outputs, cell, final_state = build_rnn(x, keep_prob, [
+            #tf.contrib.rnn.BasicLSTMCell(128), tf.contrib.rnn.BasicLSTMCell(128),
+            tf.contrib.rnn.BasicLSTMCell(128),
+        ])
 
     # Pass last output to fully connected then softmax to get class prediction
     yhat = tf.contrib.layers.fully_connected(
@@ -277,7 +311,7 @@ def lstm_model(x, y, keep_prob, num_classes, num_features):
 
     return yhat, loss, []
 
-def vrnn_model(x, y, keep_prob, num_classes, num_features, eps=1e-6):
+def vrnn_model(x, y, keep_prob, training, num_classes, num_features, eps=1e-9):
     """ Create the VRNN model """
     #
     # Model
@@ -285,19 +319,22 @@ def vrnn_model(x, y, keep_prob, num_classes, num_features, eps=1e-6):
     with tf.variable_scope("rnn_model"):
         initial_state, outputs, cell, final_state = build_rnn(x, keep_prob, [
             #VRNNCell(num_features, 128, 64), VRNNCell(128, 128, 64), # h_dim of l_i must be num_features of l_(i+1)
-            VRNNCell(num_features, 128, 64),
+            VRNNCell(num_features, 128, 10, training, batch_norm=False),
         ])
 
     h, c, \
     encoder_mu, encoder_sigma, \
     decoder_mu, decoder_sigma, \
     prior_mu, prior_sigma, \
+    x_1, z_1, \
         = outputs # TODO if multiple layers maybe do loss for each of these
 
     with tf.variable_scope("classifier"):
         # Pass last output to fully connected then softmax to get class prediction
+        output_for_classifier = h # h is the LSTM output
+        #output_for_classifier = z_1 # z is the latent variable
         yhat = tf.contrib.layers.fully_connected(
-                h[:, -1], num_classes, activation_fn=tf.nn.softmax) # h is the LSTM output
+                output_for_classifier[:, -1], num_classes, activation_fn=tf.nn.softmax)
 
     #
     # Loss
@@ -323,6 +360,7 @@ def vrnn_model(x, y, keep_prob, num_classes, num_features, eps=1e-6):
     # https://papers.nips.cc/paper/7219-simple-and-scalable-predictive-uncertainty-estimation-using-deep-ensembles.pdf
     # https://fairyonice.github.io/Create-a-neural-net-with-a-negative-log-likelihood-as-a-loss.html
     with tf.variable_scope("negative_log_likelihood"):
+        #likelihood_loss = tf.reduce_sum(tf.squared_difference(x, x_1), 1)
         likelihood_loss = 0.5*tf.reduce_mean(tf.reduce_mean(
             tf.square(decoder_mu - x) / tf.maximum(eps, tf.square(decoder_sigma))
             + tf.log(tf.maximum(eps, tf.square(decoder_sigma))),
@@ -340,6 +378,14 @@ def vrnn_model(x, y, keep_prob, num_classes, num_features, eps=1e-6):
         tf.summary.scalar("loss/kl", tf.reduce_mean(kl_loss)),
         tf.summary.scalar("loss/likelihood", tf.reduce_mean(likelihood_loss)),
         tf.summary.scalar("loss/categorical", tf.reduce_mean(categorical_loss)),
+        tf.summary.histogram("outputs/phi_x", x_1),
+        tf.summary.histogram("outputs/phi_z", z_1),
+        tf.summary.histogram("encoder/mu", encoder_mu),
+        tf.summary.histogram("encoder/sigma", encoder_sigma),
+        tf.summary.histogram("decoder/mu", decoder_mu),
+        tf.summary.histogram("decoder/sigma", decoder_sigma),
+        tf.summary.histogram("prior/mu", prior_mu),
+        tf.summary.histogram("prior/sigma", prior_sigma),
     ]
 
     return yhat, loss, summaries
@@ -375,19 +421,21 @@ def train(data_info, features, labels,
     keep_prob = tf.placeholder_with_default(1.0, shape=())
     x = tf.placeholder(tf.float32, [None, time_steps, num_features], name='x')
     y = tf.placeholder(tf.float32, [None, num_classes], name='y')
+    training = tf.placeholder(tf.bool, name='training')
 
     # Model and loss -- e.g. lstm_model
     #
     # Optionally also returns additional summaries to log, e.g. loss components
-    yhat, loss, model_summaries = model_func(x, y, keep_prob, num_classes, num_features)
+    yhat, loss, model_summaries = model_func(x, y, keep_prob, training, num_classes, num_features)
 
     # Accuracy -- https://stackoverflow.com/a/42608050/2698494
     accuracy = tf.reduce_mean(tf.cast(
         tf.equal(tf.argmax(y, axis=-1), tf.argmax(yhat, axis=-1)),
     tf.float32))
 
-    # Optimizer
-    optimizer = tf.train.AdamOptimizer().minimize(loss)
+    # Optimizer - update ops for batch norm
+    with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS, "rnn_model")):
+        optimizer = tf.train.AdamOptimizer().minimize(loss)
 
     # Summaries
     training_summaries = tf.summary.merge([
@@ -422,7 +470,7 @@ def train(data_info, features, labels,
             t = time.time()
             data_batch, labels_batch = sess.run([next_data_batch, next_labels_batch])
             _, step = sess.run([optimizer, inc_global_step],
-                    feed_dict={x: data_batch, y: labels_batch, keep_prob: 0.8})
+                    feed_dict={x: data_batch, y: labels_batch, keep_prob: 0.8, training: True})
             t = time.time() - t
 
             if i%log_save_steps == 0:
@@ -432,12 +480,12 @@ def train(data_info, features, labels,
 
                 # Log summaries run on the training data
                 summ = sess.run(training_summaries,
-                        feed_dict={x: data_batch, y: labels_batch, keep_prob: 1.0})
+                        feed_dict={x: data_batch, y: labels_batch, keep_prob: 1.0, training: False})
                 writer.add_summary(summ, step)
 
                 # Log summaries run on the evaluation/validation data
                 summ = sess.run(evaluation_summaries,
-                        feed_dict={x: eval_data, y: eval_labels, keep_prob: 1.0})
+                        feed_dict={x: eval_data, y: eval_labels, keep_prob: 1.0, training: False})
                 writer.add_summary(summ, step)
 
                 writer.flush()
@@ -452,8 +500,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Load dataset
-    train_data, train_labels = load_data("trivial/positive_slope_TRAIN")
-    test_data, test_labels = load_data("trivial/positive_slope_TEST")
+    #train_data, train_labels = load_data("trivial/positive_slope_TRAIN")
+    #test_data, test_labels = load_data("trivial/positive_slope_TEST")
+    train_data, train_labels = load_data("Plane/Plane_TRAIN")
+    test_data, test_labels = load_data("Plane/Plane_TEST")
 
     # Information about dataset
     num_features = 1 # e.g. trivial & Plane datasets only have one feature per time step
@@ -470,15 +520,16 @@ if __name__ == '__main__':
     train(data_info, train_data, train_labels,
             test_data, test_labels,
             model_func=lstm_model,
-            model_dir="lstm-models",
-            log_dir="lstm-logs")
+            model_dir="plane-test/lstm-models",
+            log_dir="plane-test/lstm-logs")
+    tf.reset_default_graph()
     """
 
     # Train and evaluate VRNN
     train(data_info, train_data, train_labels,
             test_data, test_labels,
             model_func=vrnn_model,
-            model_dir="vrnn-models",
-            log_dir="vrnn-logs")
+            model_dir="plane-test/vrnn10-models",
+            log_dir="plane-test/vrnn10-logs")
             #model_dir=args.modeldir,
             #log_dir=args.logdir)
