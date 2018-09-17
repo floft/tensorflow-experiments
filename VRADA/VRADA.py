@@ -52,7 +52,7 @@ def classifier(x, num_classes, trainable=True):
             x, num_classes, activation_fn=tf.nn.softmax, scope="classifier",
             trainable=trainable)
 
-def lstm_model(x, y, domain, keep_prob, training, num_classes, num_features):
+def lstm_model(x, y, domain, grl_lambda, keep_prob, training, num_classes, num_features, adaptation=True):
     """ Create an LSTM model as a baseline """
     # Build the LSTM
     with tf.variable_scope("rnn_model"):
@@ -75,27 +75,31 @@ def lstm_model(x, y, domain, keep_prob, training, num_classes, num_features):
     # Also pass output to domain classifier
     # Note: always have 2 domains, so set outputs to 2
     with tf.variable_scope("domain_classifier") as scope:
-        # Update domain classifier to be correct
-        domain_classifier = classifier(rnn_output, 2)
-        scope.reuse_variables()
-        # Update the RNN to make the domain classifier wrong, but in this
-        # step, don't update the domain classifier (only LSTM)
-        domain_classifier_reversed = flip_gradient(classifier(rnn_output, 2, trainable=False))
+        domain_classifier = flip_gradient(classifier(rnn_output, 2), grl_lambda)
 
-    # Loss
-    #
-    # Update LSTM and task classifier to make task classifier correct
-    task_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
-        labels=y, logits=task_classifier)
-    # Update LSTM and domain classifier to make domain classifier correct
-    domain_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
-        labels=domain, logits=domain_classifier)
-    # Update only LSTM to make domain classifier wrong (because of flip_gradient layer)
-    domain_loss_reversed = tf.nn.softmax_cross_entropy_with_logits_v2(
-        labels=domain, logits=domain_classifier_reversed)
+    # If doing domain adaptation, then we'll need to ignore the second half of the
+    # batch for task classification during training since we don't know the labels
+    # of the target data
+    if adaptation:
+        # Note: this is twice the batch_size in the train() function since we cut
+        # it in half there -- this is the sum of both source and target data
+        batch_size = tf.shape(task_classifier)[0]
 
-    return task_classifier, domain_classifier, domain_classifier_reversed, \
-        task_loss, domain_loss, domain_loss_reversed, []
+        # See: https://github.com/pumpikano/tf-dann/blob/master/Blobs-DANN.ipynb
+        task_classifier = tf.cond(training,
+            lambda: tf.slice(task_classifier, [0, 0], [batch_size // 2, -1]),
+            lambda: task_classifier)
+        y = tf.cond(training,
+            lambda: tf.slice(y, [0, 0], [batch_size // 2, -1]),
+            lambda: y)
+
+    # Losses
+    task_loss = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits_v2(
+        labels=y, logits=task_classifier))
+    domain_loss = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits_v2(
+        labels=domain, logits=domain_classifier))
+
+    return task_classifier, domain_classifier, task_loss, domain_loss, []
 
 def vrnn_model(x, y, keep_prob, training, num_classes, num_features, eps=1e-9):
     """ Create the VRNN model """
@@ -188,9 +192,7 @@ def train(data_info,
         model_func=lstm_model,
         batch_size=64,
         num_steps=1000,
-        task_learning_rate=0.001,
-        domain_learning_rate=0.005,
-        domain_learning_rate_reversed=0.001,
+        learning_rate=0.001,
         dropout_rate=0.8,
         model_dir="models",
         log_dir="logs",
@@ -205,6 +207,11 @@ def train(data_info,
 
     # Data stats
     time_steps, num_features, num_classes = data_info
+
+    # For adaptation, we'll be concatenating together half source and half target
+    # data, so to keep the batch_size about the same, we'll cut it in half
+    if adaptation:
+        batch_size = batch_size // 2
 
     # Input training data
     input_fn_a, input_hook_a = _get_input_fn(features_a, labels_a, batch_size)
@@ -226,36 +233,43 @@ def train(data_info,
     domain = tf.placeholder(tf.float32, [None, 2], name='domain') # which domain
     y = tf.placeholder(tf.float32, [None, num_classes], name='y') # class 1, 2, etc. one-hot
     training = tf.placeholder(tf.bool, name='training') # whether we're training (batch norm)
+    grl_lambda = tf.placeholder(tf.float32, shape=()) # multiple for gradient reversal layer
 
     # Source domain will be [[1,0], [1,0], ...] and target domain [[0,1], [0,1], ...]
     #
     # Size of training batch
     source_domain = domain_labels(0, batch_size)
     target_domain = domain_labels(1, batch_size)
-    # Size of evaluation batch
+    # Size of evaluation batch - TODO when lots of data, we'll need to batch this
     eval_source_domain = domain_labels(0, test_features_a.shape[0])
     eval_target_domain = domain_labels(1, test_features_b.shape[0])
 
     # Model and loss -- e.g. lstm_model
     #
     # Optionally also returns additional summaries to log, e.g. loss components
-    task_classifier, domain_classifier, domain_classifier_reversed, \
-    task_loss, domain_loss, domain_loss_reversed, model_summaries = \
-        model_func(x, y, domain, keep_prob, training, num_classes, num_features)
+    task_classifier, domain_classifier, \
+    task_loss, domain_loss, model_summaries = \
+        model_func(x, y, domain, grl_lambda, keep_prob, training,
+            num_classes, num_features, adaptation)
+
+    # Total loss is the sum
+    total_loss = task_loss + domain_loss
 
     # Accuracy of the classifiers -- https://stackoverflow.com/a/42608050/2698494
-    task_accuracy = tf.reduce_mean(tf.cast(
-        tf.equal(tf.argmax(y, axis=-1), tf.argmax(task_classifier, axis=-1)),
-    tf.float32))
-    domain_accuracy = tf.reduce_mean(tf.cast(
-        tf.equal(tf.argmax(domain, axis=-1), tf.argmax(domain_classifier, axis=-1)),
-    tf.float32))
+    with tf.variable_scope("task_accuracy"):
+        task_accuracy = tf.reduce_mean(tf.cast(
+            tf.equal(tf.argmax(y, axis=-1), tf.argmax(task_classifier, axis=-1)),
+        tf.float32))
+    with tf.variable_scope("domain_accuracy"):
+        domain_accuracy = tf.reduce_mean(tf.cast(
+            tf.equal(tf.argmax(domain, axis=-1), tf.argmax(domain_classifier, axis=-1)),
+        tf.float32))
 
     # Optimizer - update ops for batch norm (not sure batch norm is working though...)
     with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS, "rnn_model")):
-        task_optimizer = tf.train.AdamOptimizer(task_learning_rate).minimize(task_loss)
-        domain_optimizer = tf.train.AdamOptimizer(domain_learning_rate).minimize(domain_loss)
-        domain_optimizer_reversed = tf.train.AdamOptimizer(domain_learning_rate_reversed).minimize(domain_loss_reversed)
+        task_optimizer = tf.train.AdamOptimizer(learning_rate).minimize(task_loss)
+        domain_optimizer = tf.train.AdamOptimizer(learning_rate).minimize(domain_loss)
+        total_optimizer = tf.train.AdamOptimizer(learning_rate).minimize(total_loss)
 
     # Summaries - training and evaluation for both domains A and B
     training_summaries_a = tf.summary.merge([
@@ -304,6 +318,10 @@ def train(data_info,
             if i == 0:
                 writer.add_graph(sess.graph)
 
+            # GRL schedule from
+            # https://github.com/pumpikano/tf-dann/blob/master/Blobs-DANN.ipynb
+            grl_lambda_value = 2/(1+np.exp(-10*(i/(num_steps+1))))-1
+
             t = time.time()
             step = sess.run(inc_global_step)
 
@@ -313,63 +331,23 @@ def train(data_info,
                 next_data_batch_b, next_labels_batch_b,
             ])
 
-            # Train task classifier on source domain to be correct
-            sess.run(task_optimizer, feed_dict={
-                x: data_batch_a, y: labels_batch_a,
-                keep_prob: dropout_rate, training: True
-            })
-
-            # If we don't want to do domain adaptation, then don't bother
-            # optimizing the domain classifier
             if adaptation:
-                """
-                # Concatenate for adaptation
+                # Concatenate for adaptation - concatenate source labels with all-zero
+                # labels for target since we can't use the target labels during
+                # unsupervised domain adaptation
                 combined_x = np.concatenate((data_batch_a, data_batch_b), axis=0)
+                combined_labels = np.concatenate((labels_batch_a, np.zeros(labels_batch_b.shape)), axis=0)
                 combined_domain = np.concatenate((source_domain, target_domain), axis=0)
 
-                print("X:", combined_x)
-                print("Domain:", combined_domain)
-
-                print("Waiting...")
-                x=input()
-
-                # Train domain classifier to be correct
-                sess.run(domain_optimizer, feed_dict={
-                    x: combined_x, domain: combined_domain,
+                sess.run(total_optimizer, feed_dict={
+                    x: combined_x, y: combined_labels, domain: combined_domain,
+                    grl_lambda: grl_lambda_value,
                     keep_prob: dropout_rate, training: True
                 })
-
-                # Train RNN (feature extractor) to make domain classifier wrong
-                # but don't update domain classifier weights
-                sess.run(domain_optimizer_reversed, feed_dict={
-                    x: combined_x, domain: combined_domain,
-                    keep_prob: dropout_rate, training: True
-                })
-                """
-
-                # Train domain classifier on source domain to be correct
-                sess.run(domain_optimizer, feed_dict={
-                    x: data_batch_a, domain: source_domain,
-                    keep_prob: dropout_rate, training: True
-                })
-
-                # Train domain classifier on target domain to be correct
-                sess.run(domain_optimizer, feed_dict={
-                    x: data_batch_b, domain: target_domain,
-                    keep_prob: dropout_rate, training: True
-                })
-
-                # Train RNN (feature extractor) to make domain classifier wrong on
-                # source domain, but don't update domain classifier weights
-                sess.run(domain_optimizer_reversed, feed_dict={
-                    x: data_batch_a, domain: source_domain,
-                    keep_prob: dropout_rate, training: True
-                })
-
-                # Train RNN (feature extractor) to make domain classifier wrong on
-                # target domain, but don't update domain classifier weights
-                sess.run(domain_optimizer_reversed, feed_dict={
-                    x: data_batch_b, domain: target_domain,
+            else:
+                # Train task classifier on source domain to be correct
+                sess.run(task_optimizer, feed_dict={
+                    x: data_batch_a, y: labels_batch_a,
                     keep_prob: dropout_rate, training: True
                 })
 
@@ -445,8 +423,8 @@ if __name__ == '__main__':
             train_data_a, train_labels_a, test_data_a, test_labels_a,
             train_data_b, train_labels_b, test_data_b, test_labels_b,
             model_func=lstm_model,
-            model_dir="denoise-models/lstm-da-models",
-            log_dir="denoise/lstm-da-logs",
+            model_dir="denoise-models/lstm-da6-models",
+            log_dir="denoise/lstm-da6-logs",
             adaptation=True)
     #tf.reset_default_graph()
 
