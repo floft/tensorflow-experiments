@@ -8,3 +8,4 @@ trivial/
 *.h5
 *.hdf5
 __pycache__/
+.vscode/

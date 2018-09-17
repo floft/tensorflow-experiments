@@ -47,10 +47,19 @@ def build_rnn(x, keep_prob, layers):
     return initial_state, outputs, cell, final_state
 
 def classifier(x, num_classes, trainable=True):
-    """ We'll use the same clasifier for task or domain classification """
-    return tf.contrib.layers.fully_connected(
-            x, num_classes, activation_fn=tf.nn.softmax, scope="classifier",
+    """
+    We'll use the same clasifier for task or domain classification
+
+    Returns both output without applying softmax for use in loss function
+    and after for use in prediction. See softmax_cross_entropy_with_logits_v2
+    documentation: "This op expects unscaled logits, ..."
+    """
+    classifier_output = tf.contrib.layers.fully_connected(
+            x, num_classes, activation_fn=None, scope="classifier",
             trainable=trainable)
+    softmax_output = tf.nn.softmax(classifier_output, name="softmax")
+
+    return classifier_output, softmax_output
 
 def lstm_model(x, y, domain, grl_lambda, keep_prob, training,
     num_classes, num_features, adaptation=True):
@@ -70,15 +79,19 @@ def lstm_model(x, y, domain, grl_lambda, keep_prob, training,
         rnn_output = tf.contrib.layers.fully_connected(rnn_output, 25)
         rnn_output = tf.nn.dropout(rnn_output, keep_prob)
 
+        # Use the RNN output for both domain and task inputs
+        task_input = rnn_output
+        domain_input = rnn_output
+
     # Pass last output to fully connected then softmax to get class prediction
     with tf.variable_scope("task_classifier"):
-        task_classifier = classifier(rnn_output, num_classes)
+        task_classifier, task_softmax = classifier(task_input, num_classes)
 
     # Also pass output to domain classifier
     # Note: always have 2 domains, so set outputs to 2
     with tf.variable_scope("domain_classifier"):
-        domain_classifier = flip_gradient(rnn_output, grl_lambda) # gradient reversal layer
-        domain_classifier = classifier(domain_classifier, 2)
+        gradient_reversal_layer = flip_gradient(domain_input, grl_lambda)
+        domain_classifier, domain_softmax = classifier(gradient_reversal_layer, 2)
 
     # If doing domain adaptation, then we'll need to ignore the second half of the
     # batch for task classification during training since we don't know the labels
@@ -87,12 +100,23 @@ def lstm_model(x, y, domain, grl_lambda, keep_prob, training,
         with tf.variable_scope("only_use_source_labels"):
             # Note: this is twice the batch_size in the train() function since we cut
             # it in half there -- this is the sum of both source and target data
-            batch_size = tf.shape(task_classifier)[0]
+            batch_size = tf.shape(task_input)[0]
 
+            # Note: I'm doing this after the classification layers because if you do
+            # it before, then fully_connected complains that the last dimension is
+            # None (i.e. not known till we run the graph). Thus, we'll do it after
+            # all the fully-connected layers.
+            #
+            # Alternatively, I could do matmul(weights, task_input) + bias and store
+            # weights on my own if I do really need to do this at some point.
+            #
             # See: https://github.com/pumpikano/tf-dann/blob/master/Blobs-DANN.ipynb
             task_classifier = tf.cond(training,
                 lambda: tf.slice(task_classifier, [0, 0], [batch_size // 2, -1]),
                 lambda: task_classifier)
+            task_softmax = tf.cond(training,
+                lambda: tf.slice(task_softmax, [0, 0], [batch_size // 2, -1]),
+                lambda: task_softmax)
             y = tf.cond(training,
                 lambda: tf.slice(y, [0, 0], [batch_size // 2, -1]),
                 lambda: y)
@@ -110,16 +134,16 @@ def lstm_model(x, y, domain, grl_lambda, keep_prob, training,
     # Extra summaries
     #
     summaries = [
-        tf.summary.histogram("inputs/x", x),
-        tf.summary.histogram("inputs/y", y),
-        tf.summary.histogram("inputs/domain", domain),
-        tf.summary.histogram("outputs/rnn", outputs[:, -1]),
+        #tf.summary.histogram("inputs/x", x),
+        #tf.summary.histogram("inputs/y", y),
+        #tf.summary.histogram("inputs/domain", domain),
+        #tf.summary.histogram("outputs/rnn", outputs[:, -1]),
         tf.summary.histogram("outputs/feature_extractor", rnn_output),
-        tf.summary.histogram("outputs/task_classifier", task_classifier),
-        tf.summary.histogram("outputs/domain_classifier", domain_classifier),
+        tf.summary.histogram("outputs/task_classifier", task_softmax),
+        tf.summary.histogram("outputs/domain_classifier", domain_softmax),
     ]
 
-    return task_classifier, domain_classifier, task_loss, domain_loss, summaries
+    return task_softmax, domain_softmax, task_loss, domain_loss, summaries
 
 def vrnn_model(x, y, keep_prob, training, num_classes, num_features, eps=1e-9):
     """ Create the VRNN model """
@@ -211,7 +235,7 @@ def train(data_info,
         features_b, labels_b, test_features_b, test_labels_b,
         model_func=lstm_model,
         batch_size=64,
-        num_steps=1000,
+        num_steps=5000,
         learning_rate=0.001,
         dropout_keep_prob=0.8,
         model_dir="models",
