@@ -189,13 +189,14 @@ def train(data_info,
         batch_size=64,
         num_steps=1000,
         task_learning_rate=0.001,
-        domain_learning_rate=0.01,
+        domain_learning_rate=0.005,
         domain_learning_rate_reversed=0.001,
         dropout_rate=0.8,
         model_dir="models",
         log_dir="logs",
         model_save_steps=100,
-        log_save_steps=1):
+        log_save_steps=1,
+        adaptation=True):
 
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
@@ -318,31 +319,59 @@ def train(data_info,
                 keep_prob: dropout_rate, training: True
             })
 
-            # Train domain classifier on source domain to be correct
-            sess.run(domain_optimizer, feed_dict={
-                x: data_batch_a, domain: source_domain,
-                keep_prob: dropout_rate, training: True
-            })
+            # If we don't want to do domain adaptation, then don't bother
+            # optimizing the domain classifier
+            if adaptation:
+                """
+                # Concatenate for adaptation
+                combined_x = np.concatenate((data_batch_a, data_batch_b), axis=0)
+                combined_domain = np.concatenate((source_domain, target_domain), axis=0)
 
-            # Train domain classifier on target domain to be correct
-            sess.run(domain_optimizer, feed_dict={
-                x: data_batch_b, domain: target_domain,
-                keep_prob: dropout_rate, training: True
-            })
+                print("X:", combined_x)
+                print("Domain:", combined_domain)
 
-            # Train RNN (feature extractor) to make domain classifier wrong on
-            # source domain, but don't update domain classifier weights
-            sess.run(domain_optimizer_reversed, feed_dict={
-                x: data_batch_a, domain: source_domain,
-                keep_prob: dropout_rate, training: True
-            })
+                print("Waiting...")
+                x=input()
 
-            # Train RNN (feature extractor) to make domain classifier wrong on
-            # target domain, but don't update domain classifier weights
-            sess.run(domain_optimizer_reversed, feed_dict={
-                x: data_batch_b, domain: target_domain,
-                keep_prob: dropout_rate, training: True
-            })
+                # Train domain classifier to be correct
+                sess.run(domain_optimizer, feed_dict={
+                    x: combined_x, domain: combined_domain,
+                    keep_prob: dropout_rate, training: True
+                })
+
+                # Train RNN (feature extractor) to make domain classifier wrong
+                # but don't update domain classifier weights
+                sess.run(domain_optimizer_reversed, feed_dict={
+                    x: combined_x, domain: combined_domain,
+                    keep_prob: dropout_rate, training: True
+                })
+                """
+
+                # Train domain classifier on source domain to be correct
+                sess.run(domain_optimizer, feed_dict={
+                    x: data_batch_a, domain: source_domain,
+                    keep_prob: dropout_rate, training: True
+                })
+
+                # Train domain classifier on target domain to be correct
+                sess.run(domain_optimizer, feed_dict={
+                    x: data_batch_b, domain: target_domain,
+                    keep_prob: dropout_rate, training: True
+                })
+
+                # Train RNN (feature extractor) to make domain classifier wrong on
+                # source domain, but don't update domain classifier weights
+                sess.run(domain_optimizer_reversed, feed_dict={
+                    x: data_batch_a, domain: source_domain,
+                    keep_prob: dropout_rate, training: True
+                })
+
+                # Train RNN (feature extractor) to make domain classifier wrong on
+                # target domain, but don't update domain classifier weights
+                sess.run(domain_optimizer_reversed, feed_dict={
+                    x: data_batch_b, domain: target_domain,
+                    keep_prob: dropout_rate, training: True
+                })
 
             t = time.time() - t
 
@@ -394,8 +423,10 @@ if __name__ == '__main__':
     train_data_a, train_labels_a = load_data("trivial/positive_slope_TRAIN")
     test_data_a, test_labels_a = load_data("trivial/positive_slope_TEST")
 
-    train_data_b, train_labels_b = load_data("trivial/positive_sine_TRAIN")
-    test_data_b, test_labels_b = load_data("trivial/positive_sine_TEST")
+    #train_data_b, train_labels_b = load_data("trivial/positive_sine_TRAIN")
+    #test_data_b, test_labels_b = load_data("trivial/positive_sine_TEST")
+    train_data_b, train_labels_b = load_data("trivial/positive_slope_noise_TRAIN")
+    test_data_b, test_labels_b = load_data("trivial/positive_slope_noise_TEST")
 
     # Information about dataset - at the moment these are the same for both domains
     num_features = 1
@@ -414,8 +445,9 @@ if __name__ == '__main__':
             train_data_a, train_labels_a, test_data_a, test_labels_a,
             train_data_b, train_labels_b, test_data_b, test_labels_b,
             model_func=lstm_model,
-            model_dir="plane-test-models/lstm-da6-models",
-            log_dir="plane-test/lstm-da6-logs")
+            model_dir="denoise-models/lstm-da-models",
+            log_dir="denoise/lstm-da-logs",
+            adaptation=True)
     #tf.reset_default_graph()
 
     # Train and evaluate VRNN - i.e. no adaptation

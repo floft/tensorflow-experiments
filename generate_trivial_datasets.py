@@ -3,8 +3,9 @@ Generate some extremely simple time-series datasets that the RNNs should be
 able to get 100% classification accuracy on
 
 Positive-slope -- Identify if the slope of a line is positive (2) or negative (1)
+Positive-slope-noise -- same but with noise
 Positive-sine -- Identify if a sine wave (2) or negative sine wave (1)
-
+Positive-sine-noise -- same but with noise
 """
 import os
 import numpy as np
@@ -19,12 +20,16 @@ def linear(m, b, length=100, minvalue=0, maxvalue=100):
 def is_positive_slope(m):
     return m > 0
 
-def generate_positive_slope_data(n, display=False):
+def generate_positive_slope_data(n, display=False, add_noise=False):
     """ Positive or negative slope lines """
     m = np.random.normal(0, 1, (1,n))
     b = np.random.randint(-100, 100, (1,n))
     x, y = linear(m, b)
     labels = is_positive_slope(m)
+
+    if add_noise:
+        noise = np.random.normal(0, 10, (y.shape[0],n))
+        y += noise
 
     if display:
         plt.figure()
@@ -41,12 +46,16 @@ def sine(m, b, length=100, minvalue=0, maxvalue=100):
     y = m*np.sin(x/10) + b # x/10 to make adjust horizontal scale
     return x, y
 
-def generate_positive_sine_data(n, display=False):
+def generate_positive_sine_data(n, display=False, add_noise=False):
     """ Sine wave multiplied by positive or negative number and offset some """
     m = np.random.normal(0, 10, (1,n))
     b = np.random.randint(-100, 100, (1,n))
     x, y = sine(m, b)
     labels = is_positive_slope(m)
+
+    if add_noise:
+        noise = np.random.normal(0, 1, (y.shape[0],n))
+        y += noise
 
     if display:
         plt.figure()
@@ -62,7 +71,14 @@ if __name__ == '__main__':
     if not os.path.exists('trivial'):
         os.makedirs('trivial')
 
+    # No noise
     generate_positive_slope_data(1000).to_csv('trivial/positive_slope_TRAIN', header=False, index=False)
     generate_positive_slope_data(100).to_csv('trivial/positive_slope_TEST', header=False, index=False)
     generate_positive_sine_data(1000).to_csv('trivial/positive_sine_TRAIN', header=False, index=False)
     generate_positive_sine_data(100).to_csv('trivial/positive_sine_TEST', header=False, index=False)
+
+    # Noisy
+    generate_positive_slope_data(1000, add_noise=True).to_csv('trivial/positive_slope_noise_TRAIN', header=False, index=False)
+    generate_positive_slope_data(100, add_noise=True).to_csv('trivial/positive_slope_noise_TEST', header=False, index=False)
+    generate_positive_sine_data(1000, add_noise=True).to_csv('trivial/positive_sine_noise_TRAIN', header=False, index=False)
+    generate_positive_sine_data(100, add_noise=True).to_csv('trivial/positive_sine_noise_TEST', header=False, index=False)
