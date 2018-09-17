@@ -52,7 +52,8 @@ def classifier(x, num_classes, trainable=True):
             x, num_classes, activation_fn=tf.nn.softmax, scope="classifier",
             trainable=trainable)
 
-def lstm_model(x, y, domain, grl_lambda, keep_prob, training, num_classes, num_features, adaptation=True):
+def lstm_model(x, y, domain, grl_lambda, keep_prob, training,
+    num_classes, num_features, adaptation=True):
     """ Create an LSTM model as a baseline """
     # Build the LSTM
     with tf.variable_scope("rnn_model"):
@@ -61,12 +62,13 @@ def lstm_model(x, y, domain, grl_lambda, keep_prob, training, num_classes, num_f
             tf.contrib.rnn.BasicLSTMCell(128),
         ])
 
-    # We'll only use the output at the last time step for classification
-    rnn_output = outputs[:, -1]
-    rnn_output = tf.contrib.layers.fully_connected(rnn_output, 50)
-    rnn_output = tf.nn.dropout(rnn_output, keep_prob)
-    rnn_output = tf.contrib.layers.fully_connected(rnn_output, 25)
-    rnn_output = tf.nn.dropout(rnn_output, keep_prob)
+    with tf.variable_scope("feature_extractor"):
+        # We'll only use the output at the last time step for classification
+        rnn_output = outputs[:, -1]
+        rnn_output = tf.contrib.layers.fully_connected(rnn_output, 50)
+        rnn_output = tf.nn.dropout(rnn_output, keep_prob)
+        rnn_output = tf.contrib.layers.fully_connected(rnn_output, 25)
+        rnn_output = tf.nn.dropout(rnn_output, keep_prob)
 
     # Pass last output to fully connected then softmax to get class prediction
     with tf.variable_scope("task_classifier"):
@@ -81,23 +83,27 @@ def lstm_model(x, y, domain, grl_lambda, keep_prob, training, num_classes, num_f
     # batch for task classification during training since we don't know the labels
     # of the target data
     if adaptation:
-        # Note: this is twice the batch_size in the train() function since we cut
-        # it in half there -- this is the sum of both source and target data
-        batch_size = tf.shape(task_classifier)[0]
+        with tf.variable_scope("only_use_source_labels"):
+            # Note: this is twice the batch_size in the train() function since we cut
+            # it in half there -- this is the sum of both source and target data
+            batch_size = tf.shape(task_classifier)[0]
 
-        # See: https://github.com/pumpikano/tf-dann/blob/master/Blobs-DANN.ipynb
-        task_classifier = tf.cond(training,
-            lambda: tf.slice(task_classifier, [0, 0], [batch_size // 2, -1]),
-            lambda: task_classifier)
-        y = tf.cond(training,
-            lambda: tf.slice(y, [0, 0], [batch_size // 2, -1]),
-            lambda: y)
+            # See: https://github.com/pumpikano/tf-dann/blob/master/Blobs-DANN.ipynb
+            task_classifier = tf.cond(training,
+                lambda: tf.slice(task_classifier, [0, 0], [batch_size // 2, -1]),
+                lambda: task_classifier)
+            y = tf.cond(training,
+                lambda: tf.slice(y, [0, 0], [batch_size // 2, -1]),
+                lambda: y)
 
     # Losses
-    task_loss = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits_v2(
-        labels=y, logits=task_classifier))
-    domain_loss = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits_v2(
-        labels=domain, logits=domain_classifier))
+    with tf.variable_scope("task_loss"):
+        task_loss = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits_v2(
+            labels=y, logits=task_classifier))
+
+    with tf.variable_scope("domain_loss"):
+        domain_loss = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits_v2(
+            labels=domain, logits=domain_classifier))
 
     return task_classifier, domain_classifier, task_loss, domain_loss, []
 
@@ -214,18 +220,22 @@ def train(data_info,
         batch_size = batch_size // 2
 
     # Input training data
-    input_fn_a, input_hook_a = _get_input_fn(features_a, labels_a, batch_size)
-    input_fn_b, input_hook_b = _get_input_fn(features_b, labels_b, batch_size)
-    next_data_batch_a, next_labels_batch_a = input_fn_a()
-    next_data_batch_b, next_labels_batch_b = input_fn_b()
+    with tf.variable_scope("training_data_a"):
+        input_fn_a, input_hook_a = _get_input_fn(features_a, labels_a, batch_size)
+        next_data_batch_a, next_labels_batch_a = input_fn_a()
+    with tf.variable_scope("training_data_b"):
+        input_fn_b, input_hook_b = _get_input_fn(features_b, labels_b, batch_size)
+        next_data_batch_b, next_labels_batch_b = input_fn_b()
 
     # Load all the test data in one batch (we'll assume test set is small for now)
-    eval_input_fn_a, eval_input_hook_a = _get_input_fn(
-            test_features_a, test_labels_a, test_features_a.shape[0], evaluation=True)
-    eval_input_fn_b, eval_input_hook_b = _get_input_fn(
-            test_features_b, test_labels_b, test_features_b.shape[0], evaluation=True)
-    next_data_batch_test_a, next_labels_batch_test_a = eval_input_fn_a()
-    next_data_batch_test_b, next_labels_batch_test_b = eval_input_fn_b()
+    with tf.variable_scope("evaluation_data_a"):
+        eval_input_fn_a, eval_input_hook_a = _get_input_fn(
+                test_features_a, test_labels_a, test_features_a.shape[0], evaluation=True)
+        next_data_batch_test_a, next_labels_batch_test_a = eval_input_fn_a()
+    with tf.variable_scope("evaluation_data_b"):
+        eval_input_fn_b, eval_input_hook_b = _get_input_fn(
+                test_features_b, test_labels_b, test_features_b.shape[0], evaluation=True)
+        next_data_batch_test_b, next_labels_batch_test_b = eval_input_fn_b()
 
     # Inputs
     keep_prob = tf.placeholder_with_default(1.0, shape=()) # for dropout
@@ -253,7 +263,8 @@ def train(data_info,
             num_classes, num_features, adaptation)
 
     # Total loss is the sum
-    total_loss = task_loss + domain_loss
+    with tf.variable_scope("total_loss"):
+        total_loss = task_loss + domain_loss
 
     # Accuracy of the classifiers -- https://stackoverflow.com/a/42608050/2698494
     with tf.variable_scope("task_accuracy"):
