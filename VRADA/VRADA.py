@@ -22,7 +22,9 @@ if os.environ.get('DISPLAY','') == '':
 import matplotlib.pyplot as plt
 
 from VRNN import VRNNCell
-from load_data import IteratorInitializerHook, load_data, one_hot, _get_input_fn
+from load_data import IteratorInitializerHook, \
+    load_data, one_hot, \
+    domain_labels, _get_input_fn
 from flip_gradient import flip_gradient
 
 def build_rnn(x, keep_prob, layers):
@@ -44,7 +46,13 @@ def build_rnn(x, keep_prob, layers):
 
     return initial_state, outputs, cell, final_state
 
-def lstm_model(x, y, keep_prob, training, num_classes, num_features):
+def classifier(x, num_classes, trainable=True):
+    """ We'll use the same clasifier for task or domain classification """
+    return tf.contrib.layers.fully_connected(
+            x, num_classes, activation_fn=tf.nn.softmax, scope="classifier",
+            trainable=trainable)
+
+def lstm_model(x, y, domain, keep_prob, training, num_classes, num_features):
     """ Create an LSTM model as a baseline """
     # Build the LSTM
     with tf.variable_scope("rnn_model"):
@@ -53,14 +61,41 @@ def lstm_model(x, y, keep_prob, training, num_classes, num_features):
             tf.contrib.rnn.BasicLSTMCell(128),
         ])
 
+    # We'll only use the output at the last time step for classification
+    rnn_output = outputs[:, -1]
+    rnn_output = tf.contrib.layers.fully_connected(rnn_output, 50)
+    rnn_output = tf.nn.dropout(rnn_output, keep_prob)
+    rnn_output = tf.contrib.layers.fully_connected(rnn_output, 25)
+    rnn_output = tf.nn.dropout(rnn_output, keep_prob)
+
     # Pass last output to fully connected then softmax to get class prediction
-    yhat = tf.contrib.layers.fully_connected(
-            outputs[:, -1], num_classes, activation_fn=tf.nn.softmax)
+    with tf.variable_scope("task_classifier"):
+        task_classifier = classifier(rnn_output, num_classes)
+
+    # Also pass output to domain classifier
+    # Note: always have 2 domains, so set outputs to 2
+    with tf.variable_scope("domain_classifier") as scope:
+        # Update domain classifier to be correct
+        domain_classifier = classifier(rnn_output, 2)
+        scope.reuse_variables()
+        # Update the RNN to make the domain classifier wrong, but in this
+        # step, don't update the domain classifier (only LSTM)
+        domain_classifier_reversed = flip_gradient(classifier(rnn_output, 2, trainable=False))
 
     # Loss
-    loss = tf.nn.softmax_cross_entropy_with_logits_v2(labels=y, logits=yhat)
+    #
+    # Update LSTM and task classifier to make task classifier correct
+    task_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
+        labels=y, logits=task_classifier)
+    # Update LSTM and domain classifier to make domain classifier correct
+    domain_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
+        labels=domain, logits=domain_classifier)
+    # Update only LSTM to make domain classifier wrong (because of flip_gradient layer)
+    domain_loss_reversed = tf.nn.softmax_cross_entropy_with_logits_v2(
+        labels=domain, logits=domain_classifier_reversed)
 
-    return yhat, loss, []
+    return task_classifier, domain_classifier, domain_classifier_reversed, \
+        task_loss, domain_loss, domain_loss_reversed, []
 
 def vrnn_model(x, y, keep_prob, training, num_classes, num_features, eps=1e-9):
     """ Create the VRNN model """
@@ -153,6 +188,10 @@ def train(data_info,
         model_func=lstm_model,
         batch_size=64,
         num_steps=1000,
+        task_learning_rate=0.001,
+        domain_learning_rate=0.01,
+        domain_learning_rate_reversed=0.001,
+        dropout_rate=0.8,
         model_dir="models",
         log_dir="logs",
         model_save_steps=100,
@@ -181,38 +220,60 @@ def train(data_info,
     next_data_batch_test_b, next_labels_batch_test_b = eval_input_fn_b()
 
     # Inputs
-    keep_prob = tf.placeholder_with_default(1.0, shape=())
-    x = tf.placeholder(tf.float32, [None, time_steps, num_features], name='x')
-    y = tf.placeholder(tf.float32, [None, num_classes], name='y')
-    training = tf.placeholder(tf.bool, name='training')
+    keep_prob = tf.placeholder_with_default(1.0, shape=()) # for dropout
+    x = tf.placeholder(tf.float32, [None, time_steps, num_features], name='x') # input data
+    domain = tf.placeholder(tf.float32, [None, 2], name='domain') # which domain
+    y = tf.placeholder(tf.float32, [None, num_classes], name='y') # class 1, 2, etc. one-hot
+    training = tf.placeholder(tf.bool, name='training') # whether we're training (batch norm)
+
+    # Source domain will be [[1,0], [1,0], ...] and target domain [[0,1], [0,1], ...]
+    #
+    # Size of training batch
+    source_domain = domain_labels(0, batch_size)
+    target_domain = domain_labels(1, batch_size)
+    # Size of evaluation batch
+    eval_source_domain = domain_labels(0, test_features_a.shape[0])
+    eval_target_domain = domain_labels(1, test_features_b.shape[0])
 
     # Model and loss -- e.g. lstm_model
     #
     # Optionally also returns additional summaries to log, e.g. loss components
-    yhat, loss, model_summaries = model_func(x, y, keep_prob, training, num_classes, num_features)
+    task_classifier, domain_classifier, domain_classifier_reversed, \
+    task_loss, domain_loss, domain_loss_reversed, model_summaries = \
+        model_func(x, y, domain, keep_prob, training, num_classes, num_features)
 
-    # Accuracy -- https://stackoverflow.com/a/42608050/2698494
-    accuracy = tf.reduce_mean(tf.cast(
-        tf.equal(tf.argmax(y, axis=-1), tf.argmax(yhat, axis=-1)),
+    # Accuracy of the classifiers -- https://stackoverflow.com/a/42608050/2698494
+    task_accuracy = tf.reduce_mean(tf.cast(
+        tf.equal(tf.argmax(y, axis=-1), tf.argmax(task_classifier, axis=-1)),
+    tf.float32))
+    domain_accuracy = tf.reduce_mean(tf.cast(
+        tf.equal(tf.argmax(domain, axis=-1), tf.argmax(domain_classifier, axis=-1)),
     tf.float32))
 
-    # Optimizer - update ops for batch norm
+    # Optimizer - update ops for batch norm (not sure batch norm is working though...)
     with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS, "rnn_model")):
-        optimizer = tf.train.AdamOptimizer().minimize(loss)
+        task_optimizer = tf.train.AdamOptimizer(task_learning_rate).minimize(task_loss)
+        domain_optimizer = tf.train.AdamOptimizer(domain_learning_rate).minimize(domain_loss)
+        domain_optimizer_reversed = tf.train.AdamOptimizer(domain_learning_rate_reversed).minimize(domain_loss_reversed)
 
     # Summaries - training and evaluation for both domains A and B
     training_summaries_a = tf.summary.merge([
-        tf.summary.scalar("loss/total_loss", tf.reduce_mean(loss)),
-        tf.summary.scalar("accuracy/a/training", accuracy)
+        tf.summary.scalar("loss/task_loss", tf.reduce_mean(task_loss)),
+        tf.summary.scalar("loss/domain_loss", tf.reduce_mean(domain_loss)),
+        tf.summary.scalar("accuracy/task/source/training", task_accuracy),
+        tf.summary.scalar("accuracy/domain/source/training", domain_accuracy),
     ]+model_summaries)
     training_summaries_b = tf.summary.merge([
-        tf.summary.scalar("accuracy/b/training", accuracy)
+        tf.summary.scalar("accuracy/task/target/training", task_accuracy),
+        tf.summary.scalar("accuracy/domain/target/training", domain_accuracy)
     ])
     evaluation_summaries_a = tf.summary.merge([
-        tf.summary.scalar("accuracy/a/validation", accuracy)
+        tf.summary.scalar("accuracy/task/source/validation", task_accuracy),
+        tf.summary.scalar("accuracy/domain/source/validation", domain_accuracy),
     ])
     evaluation_summaries_b = tf.summary.merge([
-        tf.summary.scalar("accuracy/b/validation", accuracy)
+        tf.summary.scalar("accuracy/task/target/validation", task_accuracy),
+        tf.summary.scalar("accuracy/domain/target/validation", domain_accuracy),
     ])
 
     # Allow restoring global_step from past run
@@ -243,33 +304,77 @@ def train(data_info,
                 writer.add_graph(sess.graph)
 
             t = time.time()
+            step = sess.run(inc_global_step)
+
+            # Get data for this iteration
             data_batch_a, labels_batch_a, data_batch_b, labels_batch_b = sess.run([
                 next_data_batch_a, next_labels_batch_a,
                 next_data_batch_b, next_labels_batch_b,
             ])
-            _, step = sess.run([optimizer, inc_global_step],
-                    feed_dict={x: data_batch_a, y: labels_batch_a, keep_prob: 0.8, training: True})
+
+            # Train task classifier on source domain to be correct
+            sess.run(task_optimizer, feed_dict={
+                x: data_batch_a, y: labels_batch_a,
+                keep_prob: dropout_rate, training: True
+            })
+
+            # Train domain classifier on source domain to be correct
+            sess.run(domain_optimizer, feed_dict={
+                x: data_batch_a, domain: source_domain,
+                keep_prob: dropout_rate, training: True
+            })
+
+            # Train domain classifier on target domain to be correct
+            sess.run(domain_optimizer, feed_dict={
+                x: data_batch_b, domain: target_domain,
+                keep_prob: dropout_rate, training: True
+            })
+
+            # Train RNN (feature extractor) to make domain classifier wrong on
+            # source domain, but don't update domain classifier weights
+            sess.run(domain_optimizer_reversed, feed_dict={
+                x: data_batch_a, domain: source_domain,
+                keep_prob: dropout_rate, training: True
+            })
+
+            # Train RNN (feature extractor) to make domain classifier wrong on
+            # target domain, but don't update domain classifier weights
+            sess.run(domain_optimizer_reversed, feed_dict={
+                x: data_batch_b, domain: target_domain,
+                keep_prob: dropout_rate, training: True
+            })
+
             t = time.time() - t
 
             if i%log_save_steps == 0:
                 # Log the step time
-                summ = tf.Summary(value=[tf.Summary.Value(tag="step_time", simple_value=t)])
+                summ = tf.Summary(value=[
+                    tf.Summary.Value(tag="step_time", simple_value=t)
+                ])
                 writer.add_summary(summ, step)
 
                 # Log summaries run on the training data
-                summ = sess.run(training_summaries_a,
-                        feed_dict={x: data_batch_a, y: labels_batch_a, keep_prob: 1.0, training: False})
+                summ = sess.run(training_summaries_a, feed_dict={
+                    x: data_batch_a, y: labels_batch_a, domain: source_domain,
+                    keep_prob: 1.0, training: False
+                })
                 writer.add_summary(summ, step)
-                summ = sess.run(training_summaries_b,
-                        feed_dict={x: data_batch_b, y: labels_batch_b, keep_prob: 1.0, training: False})
+                summ = sess.run(training_summaries_b, feed_dict={
+                    x: data_batch_b, y: labels_batch_b, domain: target_domain,
+                    keep_prob: 1.0, training: False
+                })
                 writer.add_summary(summ, step)
 
                 # Log summaries run on the evaluation/validation data
-                summ = sess.run(evaluation_summaries_a,
-                        feed_dict={x: eval_data_a, y: eval_labels_a, keep_prob: 1.0, training: False})
+                summ = sess.run(evaluation_summaries_a, feed_dict={
+                    x: eval_data_a, y: eval_labels_a, domain: eval_source_domain,
+                    keep_prob: 1.0, training: False
+                })
                 writer.add_summary(summ, step)
-                summ = sess.run(evaluation_summaries_b,
-                        feed_dict={x: eval_data_b, y: eval_labels_b, keep_prob: 1.0, training: False})
+                summ = sess.run(evaluation_summaries_b, feed_dict={
+                    x: eval_data_b, y: eval_labels_b, domain: eval_target_domain,
+                    keep_prob: 1.0, training: False
+                })
                 writer.add_summary(summ, step)
 
                 writer.flush()
@@ -279,8 +384,10 @@ def train(data_info,
 if __name__ == '__main__':
     # Used when training on Kamiak
     parser = argparse.ArgumentParser()
-    parser.add_argument('--modeldir', default="models", type=str, help="Directory for saving model files")
-    parser.add_argument('--logdir', default="logs", type=str, help="Directory for saving log files")
+    parser.add_argument('--modeldir', default="models", type=str,
+        help="Directory for saving model files")
+    parser.add_argument('--logdir', default="logs", type=str,
+        help="Directory for saving log files")
     args = parser.parse_args()
 
     # Load datasets - domains A & B
@@ -303,23 +410,23 @@ if __name__ == '__main__':
     test_data_b, test_labels_b = one_hot(test_data_b, test_labels_b, num_classes)
 
     # Train and evaluate LSTM - i.e. no adaptation
-    """
     train(data_info,
             train_data_a, train_labels_a, test_data_a, test_labels_a,
             train_data_b, train_labels_b, test_data_b, test_labels_b,
             model_func=lstm_model,
-            model_dir="plane-test/lstm-models",
-            log_dir="plane-test/lstm-logs")
+            model_dir="plane-test-models/lstm-da6-models",
+            log_dir="plane-test/lstm-da6-logs")
     #tf.reset_default_graph()
-    """
 
     # Train and evaluate VRNN - i.e. no adaptation
+    """
     train(data_info,
             train_data_a, train_labels_a, test_data_a, test_labels_a,
             train_data_b, train_labels_b, test_data_b, test_labels_b,
             model_func=vrnn_model,
-            model_dir="plane-test/vrnn-models",
-            log_dir="plane-test/vrnn-logs")
+            model_dir="plane-test-models/vrnn-da-models",
+            log_dir="plane-test/vrnn-da-logs")
+    """
 
     # Train and evaluate VRADA - i.e. VRNN but with adversarial domain adaptation
     """
@@ -327,7 +434,7 @@ if __name__ == '__main__':
             train_data_a, train_labels_a, test_data_a, test_labels_a,
             train_data_b, train_labels_b, test_data_b, test_labels_b,
             model_func=vrada_model,
-            model_dir="plane-test/vrada-models",
+            model_dir="plane-test-models/vrada-models",
             log_dir="plane-test/vrada-logs")
             #model_dir=args.modeldir,
             #log_dir=args.logdir)

@@ -61,3 +61,11 @@ def one_hot(x, y, num_classes):
     x = np.expand_dims(x, axis=2).astype(np.float32)
     y = np.eye(num_classes)[np.squeeze(y).astype(np.uint8) - 1] # one-hot encode
     return x, y
+
+def tf_domain_labels(label, batch_size):
+    """ Generate one-hot encoded labels for which domain data is from """
+    return tf.tile(tf.one_hot([0], depth=2), [batch_size,1])
+
+def domain_labels(label, batch_size):
+    """ Same as tf_domain_labels but using numpy rather than TensorFlow """
+    return np.tile(np.eye(2)[label], [batch_size,1])
