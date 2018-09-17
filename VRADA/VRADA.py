@@ -241,13 +241,27 @@ def plot_embedding(x, y, d, title=None, filename=None):
     x_min, x_max = np.min(x, 0), np.max(x, 0)
     x = (x - x_min) / (x_max - x_min)
 
+    #colors = ["xkcd:orange", "xkcd:teal", "xkcd:darkgreen", "xkcd:orchid", "xkcd:blue", "xkcd:indigo"]
+
+    colors = {
+        (0, 0): 'xkcd:orange', # source 0
+        (0, 1): 'xkcd:teal', # source 1
+        (1, 0): 'xkcd:darkgreen', # target 0
+        (1, 1): 'xkcd:indigo', # target 1
+    }
+
+    domain = {
+        0: 'S',
+        1: 'T',
+    }
+
     # Plot colors numbers
     plt.figure(figsize=(10,10))
     ax = plt.subplot(111)
     for i in range(x.shape[0]):
         # plot colored number
-        plt.text(x[i, 0], x[i, 1], str(y[i]),
-                 color=plt.cm.bwr(d[i] / 1.),
+        plt.text(x[i, 0], x[i, 1], domain[d[i]]+str(y[i]),
+                 color=colors[(d[i], y[i])],
                  fontdict={'weight': 'bold', 'size': 9})
 
     plt.xticks([]), plt.yticks([])
@@ -489,15 +503,20 @@ def train(data_info,
             combined_x = np.concatenate((eval_data_a, eval_data_b), axis=0)
             combined_labels = np.concatenate((eval_labels_a, eval_labels_b), axis=0)
             combined_domain = np.concatenate((eval_source_domain, eval_target_domain), axis=0)
-            embedding = sess.run(feature_extractor, feed_dict={
-                x: combined_x, keep_prob: 1.0, training: False
-            })
 
-            tsne = TSNE(perplexity=30, n_components=2, init='pca', n_iter=3000)
-            tsne_fit = tsne.fit_transform(embedding)
+            if os.path.exists(tsne_filename+'_tsne_fit.npy'):
+                print("Note: generating t-SNE plot using using pre-existing embedding")
+                tsne_fit = np.load(tsne_filename+'_tsne_fit.npy')
+            else:
+                print("Note: did not find t-SNE weights -- recreating")
 
-            np.save('fit', tsne_fit)
-            #tsne_fit = np.load('fit.npy')
+                embedding = sess.run(feature_extractor, feed_dict={
+                    x: combined_x, keep_prob: 1.0, training: False
+                })
+
+                tsne = TSNE(perplexity=30, n_components=2, init='pca', n_iter=3000)
+                tsne_fit = tsne.fit_transform(embedding)
+                np.save(tsne_filename+'_tsne_fit', tsne_fit)
 
             plot_embedding(tsne_fit, combined_labels.argmax(1), combined_domain.argmax(1),
                 title='Domain Adaptation', filename=tsne_filename)
