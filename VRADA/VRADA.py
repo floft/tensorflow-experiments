@@ -76,8 +76,9 @@ def lstm_model(x, y, domain, grl_lambda, keep_prob, training,
 
     # Also pass output to domain classifier
     # Note: always have 2 domains, so set outputs to 2
-    with tf.variable_scope("domain_classifier") as scope:
-        domain_classifier = flip_gradient(classifier(rnn_output, 2), grl_lambda)
+    with tf.variable_scope("domain_classifier"):
+        domain_classifier = flip_gradient(rnn_output, grl_lambda) # gradient reversal layer
+        domain_classifier = classifier(domain_classifier, 2)
 
     # If doing domain adaptation, then we'll need to ignore the second half of the
     # batch for task classification during training since we don't know the labels
@@ -105,7 +106,20 @@ def lstm_model(x, y, domain, grl_lambda, keep_prob, training,
         domain_loss = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits_v2(
             labels=domain, logits=domain_classifier))
 
-    return task_classifier, domain_classifier, task_loss, domain_loss, []
+    #
+    # Extra summaries
+    #
+    summaries = [
+        tf.summary.histogram("inputs/x", x),
+        tf.summary.histogram("inputs/y", y),
+        tf.summary.histogram("inputs/domain", domain),
+        tf.summary.histogram("outputs/rnn", outputs[:, -1]),
+        tf.summary.histogram("outputs/feature_extractor", rnn_output),
+        tf.summary.histogram("outputs/task_classifier", task_classifier),
+        tf.summary.histogram("outputs/domain_classifier", domain_classifier),
+    ]
+
+    return task_classifier, domain_classifier, task_loss, domain_loss, summaries
 
 def vrnn_model(x, y, keep_prob, training, num_classes, num_features, eps=1e-9):
     """ Create the VRNN model """
@@ -199,7 +213,7 @@ def train(data_info,
         batch_size=64,
         num_steps=1000,
         learning_rate=0.001,
-        dropout_rate=0.8,
+        dropout_keep_prob=0.8,
         model_dir="models",
         log_dir="logs",
         model_save_steps=100,
@@ -278,14 +292,16 @@ def train(data_info,
 
     # Optimizer - update ops for batch norm (not sure batch norm is working though...)
     with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS, "rnn_model")):
+        # If no adaptation, only optimize for task
         task_optimizer = tf.train.AdamOptimizer(learning_rate).minimize(task_loss)
-        domain_optimizer = tf.train.AdamOptimizer(learning_rate).minimize(domain_loss)
+        # If adaptation, optimize both for task and adversarial domain classifier too
         total_optimizer = tf.train.AdamOptimizer(learning_rate).minimize(total_loss)
 
     # Summaries - training and evaluation for both domains A and B
     training_summaries_a = tf.summary.merge([
         tf.summary.scalar("loss/task_loss", tf.reduce_mean(task_loss)),
         tf.summary.scalar("loss/domain_loss", tf.reduce_mean(domain_loss)),
+        tf.summary.scalar("loss/total_loss", tf.reduce_mean(total_loss)),
         tf.summary.scalar("accuracy/task/source/training", task_accuracy),
         tf.summary.scalar("accuracy/domain/source/training", domain_accuracy),
     ]+model_summaries)
@@ -353,13 +369,13 @@ def train(data_info,
                 sess.run(total_optimizer, feed_dict={
                     x: combined_x, y: combined_labels, domain: combined_domain,
                     grl_lambda: grl_lambda_value,
-                    keep_prob: dropout_rate, training: True
+                    keep_prob: dropout_keep_prob, training: True
                 })
             else:
                 # Train task classifier on source domain to be correct
                 sess.run(task_optimizer, feed_dict={
                     x: data_batch_a, y: labels_batch_a,
-                    keep_prob: dropout_rate, training: True
+                    keep_prob: dropout_keep_prob, training: True
                 })
 
             t = time.time() - t
@@ -414,8 +430,8 @@ if __name__ == '__main__':
 
     #train_data_b, train_labels_b = load_data("trivial/positive_sine_TRAIN")
     #test_data_b, test_labels_b = load_data("trivial/positive_sine_TEST")
-    train_data_b, train_labels_b = load_data("trivial/positive_slope_noise_TRAIN")
-    test_data_b, test_labels_b = load_data("trivial/positive_slope_noise_TEST")
+    train_data_b, train_labels_b = load_data("trivial/positive_slope_low_TRAIN")
+    test_data_b, test_labels_b = load_data("trivial/positive_slope_low_TEST")
 
     # Information about dataset - at the moment these are the same for both domains
     num_features = 1
@@ -434,8 +450,8 @@ if __name__ == '__main__':
             train_data_a, train_labels_a, test_data_a, test_labels_a,
             train_data_b, train_labels_b, test_data_b, test_labels_b,
             model_func=lstm_model,
-            model_dir="denoise-models/lstm-da6-models",
-            log_dir="denoise/lstm-da6-logs",
+            model_dir="offset-models/lstm-da-models",
+            log_dir="offset/lstm-da-logs",
             adaptation=True)
     #tf.reset_default_graph()
 
