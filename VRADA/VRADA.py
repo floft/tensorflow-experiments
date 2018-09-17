@@ -3,7 +3,6 @@
 # VRADA
 #
 # See the paper: https://openreview.net/pdf?id=rk9eAFcxg
-# Most of this code is from the my VRNN experiment in ../VRNN/VRNN.py
 #
 import os
 import time
@@ -11,6 +10,8 @@ import argparse
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+from sklearn.manifold import TSNE
+#from tensorflow.contrib.tensorboard.plugins import projector
 
 # Due to this being run on Kamiak, that doesn't have _tkinter, we have to set a
 # different backend otherwise it'll error
@@ -58,7 +59,7 @@ def classifier(x, num_classes, trainable=True):
             x, num_classes, activation_fn=None, scope="classifier",
             trainable=trainable)
     softmax_output = tf.nn.softmax(classifier_output, name="softmax")
-
+    
     return classifier_output, softmax_output
 
 def lstm_model(x, y, domain, grl_lambda, keep_prob, training,
@@ -73,15 +74,15 @@ def lstm_model(x, y, domain, grl_lambda, keep_prob, training,
 
     with tf.variable_scope("feature_extractor"):
         # We'll only use the output at the last time step for classification
-        rnn_output = outputs[:, -1]
-        rnn_output = tf.contrib.layers.fully_connected(rnn_output, 50)
-        rnn_output = tf.nn.dropout(rnn_output, keep_prob)
-        rnn_output = tf.contrib.layers.fully_connected(rnn_output, 25)
-        rnn_output = tf.nn.dropout(rnn_output, keep_prob)
+        feature_extractor = outputs[:, -1]
+        feature_extractor = tf.contrib.layers.fully_connected(feature_extractor, 50)
+        feature_extractor = tf.nn.dropout(feature_extractor, keep_prob)
+        feature_extractor = tf.contrib.layers.fully_connected(feature_extractor, 25)
+        feature_extractor = tf.nn.dropout(feature_extractor, keep_prob)
 
         # Use the RNN output for both domain and task inputs
-        task_input = rnn_output
-        domain_input = rnn_output
+        task_input = feature_extractor
+        domain_input = feature_extractor
 
     # Pass last output to fully connected then softmax to get class prediction
     with tf.variable_scope("task_classifier"):
@@ -138,12 +139,13 @@ def lstm_model(x, y, domain, grl_lambda, keep_prob, training,
         #tf.summary.histogram("inputs/y", y),
         #tf.summary.histogram("inputs/domain", domain),
         #tf.summary.histogram("outputs/rnn", outputs[:, -1]),
-        tf.summary.histogram("outputs/feature_extractor", rnn_output),
+        tf.summary.histogram("outputs/feature_extractor", feature_extractor),
         tf.summary.histogram("outputs/task_classifier", task_softmax),
         tf.summary.histogram("outputs/domain_classifier", domain_softmax),
     ]
 
-    return task_softmax, domain_softmax, task_loss, domain_loss, summaries
+    return task_softmax, domain_softmax, task_loss, domain_loss, \
+        feature_extractor, summaries
 
 def vrnn_model(x, y, keep_prob, training, num_classes, num_features, eps=1e-9):
     """ Create the VRNN model """
@@ -230,18 +232,46 @@ def vrnn_model(x, y, keep_prob, training, num_classes, num_features, eps=1e-9):
 
     return yhat, loss, summaries
 
+def plot_embedding(x, y, d, title=None, filename=None):
+    """
+    Plot an embedding X with the class label y colored by the domain d.
+    
+    From: https://github.com/pumpikano/tf-dann/blob/master/utils.py
+    """
+    x_min, x_max = np.min(x, 0), np.max(x, 0)
+    x = (x - x_min) / (x_max - x_min)
+
+    # Plot colors numbers
+    plt.figure(figsize=(10,10))
+    ax = plt.subplot(111)
+    for i in range(x.shape[0]):
+        # plot colored number
+        plt.text(x[i, 0], x[i, 1], str(y[i]),
+                 color=plt.cm.bwr(d[i] / 1.),
+                 fontdict={'weight': 'bold', 'size': 9})
+
+    plt.xticks([]), plt.yticks([])
+
+    if title is not None:
+        plt.title(title)
+
+    if filename is not None:
+        plt.savefig(filename, bbox_inches='tight', pad_inches=0, transparent=True)
+
 def train(data_info,
         features_a, labels_a, test_features_a, test_labels_a,
         features_b, labels_b, test_features_b, test_labels_b,
         model_func=lstm_model,
-        batch_size=64,
-        num_steps=5000,
+        batch_size=128,
+        num_steps=10000,
         learning_rate=0.001,
         dropout_keep_prob=0.8,
         model_dir="models",
         log_dir="logs",
+        tsne_filename=None,
         model_save_steps=100,
         log_save_steps=1,
+        log_extra_save_steps=25,
         adaptation=True):
 
     if not os.path.exists(model_dir):
@@ -296,7 +326,8 @@ def train(data_info,
     #
     # Optionally also returns additional summaries to log, e.g. loss components
     task_classifier, domain_classifier, \
-    task_loss, domain_loss, model_summaries = \
+    task_loss, domain_loss, \
+    feature_extractor, model_summaries = \
         model_func(x, y, domain, grl_lambda, keep_prob, training,
             num_classes, num_features, adaptation)
 
@@ -328,7 +359,8 @@ def train(data_info,
         tf.summary.scalar("loss/total_loss", tf.reduce_mean(total_loss)),
         tf.summary.scalar("accuracy/task/source/training", task_accuracy),
         tf.summary.scalar("accuracy/domain/source/training", domain_accuracy),
-    ]+model_summaries)
+    ])
+    training_summaries_extra_a = tf.summary.merge(model_summaries)
     training_summaries_b = tf.summary.merge([
         tf.summary.scalar("accuracy/task/target/training", task_accuracy),
         tf.summary.scalar("accuracy/domain/target/training", domain_accuracy)
@@ -436,8 +468,39 @@ def train(data_info,
                 writer.add_summary(summ, step)
 
                 writer.flush()
+            
+            # Extra stuff only log occasionally, e.g. this is weights and larger stuff
+            if i%log_extra_save_steps == 0:
+                summ = sess.run(training_summaries_extra_a, feed_dict={
+                    x: data_batch_a, y: labels_batch_a, domain: source_domain,
+                    keep_prob: 1.0, training: False
+                })
+                writer.add_summary(summ, step)
+
+                writer.flush()
 
         writer.flush()
+
+        # Output t-SNE after we've trained everything on the evaluation data
+        #
+        # Maybe in the future it would be cool to use TensorFlow's projector in TensorBoard
+        # https://medium.com/@vegi/visualizing-higher-dimensional-data-using-t-sne-on-tensorboard-7dbf22682cf2
+        if tsne_filename is not None:
+            combined_x = np.concatenate((eval_data_a, eval_data_b), axis=0)
+            combined_labels = np.concatenate((eval_labels_a, eval_labels_b), axis=0)
+            combined_domain = np.concatenate((eval_source_domain, eval_target_domain), axis=0)
+            embedding = sess.run(feature_extractor, feed_dict={
+                x: combined_x, keep_prob: 1.0, training: False
+            })
+
+            tsne = TSNE(perplexity=30, n_components=2, init='pca', n_iter=3000)
+            tsne_fit = tsne.fit_transform(embedding)
+
+            np.save('fit', tsne_fit)
+            #tsne_fit = np.load('fit.npy')
+
+            plot_embedding(tsne_fit, combined_labels.argmax(1), combined_domain.argmax(1),
+                title='Domain Adaptation', filename=tsne_filename)
 
 if __name__ == '__main__':
     # Used when training on Kamiak
@@ -474,8 +537,11 @@ if __name__ == '__main__':
             train_data_a, train_labels_a, test_data_a, test_labels_a,
             train_data_b, train_labels_b, test_data_b, test_labels_b,
             model_func=lstm_model,
-            model_dir="offset-models/lstm-da-models",
-            log_dir="offset/lstm-da-logs",
+            model_dir=args.modeldir,
+            log_dir=args.logdir,
+            tsne_filename='lstm_tsne.png',
+            #model_dir="offset-models/lstm-da4-models",
+            #log_dir="offset/lstm-da4-logs",
             adaptation=True)
     #tf.reset_default_graph()
 

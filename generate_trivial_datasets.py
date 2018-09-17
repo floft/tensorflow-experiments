@@ -71,8 +71,8 @@ def generate_positive_sine_data(n, display=False, add_noise=False,
 
 def save_data(func, fn):
     """ Use func to create examples that are saved to fn_TRAIN and fn_TEST """
-    func(1000).to_csv('trivial/'+fn+'_TRAIN', header=False, index=False)
-    func(100).to_csv('trivial/'+fn+'_TEST', header=False, index=False)
+    func(10000).to_csv('trivial/'+fn+'_TRAIN', header=False, index=False)
+    func(1000).to_csv('trivial/'+fn+'_TEST', header=False, index=False)
 
 if __name__ == '__main__':
     # For reproducability

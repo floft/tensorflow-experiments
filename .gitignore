@@ -9,3 +9,5 @@ trivial/
 *.hdf5
 __pycache__/
 .vscode/
+*.npy
+*.png
