@@ -164,8 +164,11 @@ def build_lstm(x, y, domain, grl_lambda, keep_prob, training,
         tf.summary.histogram("outputs/domain_classifier", domain_softmax),
     ]
 
+    # We can't generate with an LSTM
+    extra_outputs = None
+
     return task_softmax, domain_softmax, total_loss, \
-        feature_extractor, summaries
+        feature_extractor, summaries, extra_outputs
 
 def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
             num_classes, num_features, adaptation, eps=1e-9):
@@ -173,7 +176,7 @@ def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
     # Build VRNN
     with tf.variable_scope("rnn_model"):
         initial_state, outputs, cell, final_state = build_rnn(x, keep_prob, [
-            VRNNCell(num_features, 100, 100, training, batch_norm=False),
+            VRNNCell(num_features, 100, 50, training, batch_norm=False),
         ])
         # Note: if you try using more than one layer above, then you need to
         # change the loss since for instance if you put an LSTM layer before
@@ -247,5 +250,13 @@ def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
         tf.summary.histogram("prior/sigma", prior_sigma),
     ]
 
+    # So we can generate sample time-series as well
+    #
+    # Average over the batch
+    extra_outputs = [
+        tf.reduce_mean(decoder_mu, axis=0),
+        tf.reduce_mean(decoder_sigma, axis=0),
+    ]
+
     return task_softmax, domain_softmax, total_loss, \
-        feature_extractor, summaries
+        feature_extractor, summaries, extra_outputs

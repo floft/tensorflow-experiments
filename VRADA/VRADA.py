@@ -23,7 +23,7 @@ if os.environ.get('DISPLAY','') == '':
     mpl.use('Agg')
 import matplotlib.pyplot as plt
 
-from plot import plot_embedding
+from plot import plot_embedding, plot_time_series
 from model import build_lstm, build_vrnn
 from load_data import IteratorInitializerHook, \
     load_data, one_hot, \
@@ -98,7 +98,7 @@ def train(data_info,
     #
     # Optionally also returns additional summaries to log, e.g. loss components
     task_classifier, domain_classifier, total_loss, \
-    feature_extractor, model_summaries = \
+    feature_extractor, model_summaries, extra_model_outputs = \
         model_func(x, y, domain, grl_lambda, keep_prob, training,
             num_classes, num_features, adaptation)
 
@@ -248,10 +248,6 @@ def train(data_info,
         # Maybe in the future it would be cool to use TensorFlow's projector in TensorBoard
         # https://medium.com/@vegi/visualizing-higher-dimensional-data-using-t-sne-on-tensorboard-7dbf22682cf2
         if embedding_prefix is not None:
-            combined_x = np.concatenate((eval_data_a, eval_data_b), axis=0)
-            combined_labels = np.concatenate((eval_labels_a, eval_labels_b), axis=0)
-            combined_domain = np.concatenate((eval_source_domain, eval_target_domain), axis=0)
-
             """
             if os.path.exists(tsne_filename+'_tsne_fit.npy'):
                 print("Note: generating t-SNE plot using using pre-existing embedding")
@@ -264,6 +260,10 @@ def train(data_info,
             np.save(tsne_filename+'_pca_fit', pca)
             """
 
+            combined_x = np.concatenate((eval_data_a, eval_data_b), axis=0)
+            combined_labels = np.concatenate((eval_labels_a, eval_labels_b), axis=0)
+            combined_domain = np.concatenate((eval_source_domain, eval_target_domain), axis=0)
+
             embedding = sess.run(feature_extractor, feed_dict={
                 x: combined_x, keep_prob: 1.0, training: False
             })
@@ -275,6 +275,24 @@ def train(data_info,
                 title='Domain Adaptation', filename=embedding_prefix+"_tsne.png")
             plot_embedding(pca, combined_labels.argmax(1), combined_domain.argmax(1),
                 title='Domain Adaptation', filename=embedding_prefix+"_pca.png")
+        
+            # Output sample time-series from our generator if we have one
+            if extra_model_outputs is not None:
+                # We'll get the decoder's mu and sigma from the evaluation/validation set since
+                # it's much larger than the training batches
+                mu, sigma = sess.run(extra_model_outputs, feed_dict={
+                    x: eval_data_a, keep_prob: 1.0, training: False
+                })
+
+                plot_time_series(mu, sigma, title='VRNN Samples (source domain)',
+                    filename=embedding_prefix+"_samples_a.png")
+
+                mu, sigma = sess.run(extra_model_outputs, feed_dict={
+                    x: eval_data_b, keep_prob: 1.0, training: False
+                })
+
+                plot_time_series(mu, sigma, title='VRNN Samples (target domain)',
+                    filename=embedding_prefix+"_samples_b.png")
 
 if __name__ == '__main__':
     # Used when training on Kamiak
@@ -323,7 +341,7 @@ if __name__ == '__main__':
     """
     #tf.reset_default_graph()
 
-    attempt = 4
+    attempt = 6
 
     # Train and evaluate VRNN - i.e. no adaptation
     train(data_info,
