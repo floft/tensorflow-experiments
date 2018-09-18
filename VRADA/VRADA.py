@@ -23,7 +23,7 @@ if os.environ.get('DISPLAY','') == '':
     mpl.use('Agg')
 import matplotlib.pyplot as plt
 
-from plot import plot_embedding, plot_time_series
+from plot import plot_embedding, plot_random_time_series
 from model import build_lstm, build_vrnn
 from load_data import IteratorInitializerHook, \
     load_data, one_hot, \
