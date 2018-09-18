@@ -251,11 +251,8 @@ def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
     ]
 
     # So we can generate sample time-series as well
-    #
-    # Average over the batch
     extra_outputs = [
-        tf.reduce_mean(decoder_mu, axis=0),
-        tf.reduce_mean(decoder_sigma, axis=0),
+        decoder_mu, decoder_sigma,
     ]
 
     return task_softmax, domain_softmax, total_loss, \

@@ -276,7 +276,7 @@ def train(data_info,
             plot_embedding(pca, combined_labels.argmax(1), combined_domain.argmax(1),
                 title='Domain Adaptation', filename=embedding_prefix+"_pca.png")
         
-            # Output sample time-series from our generator if we have one
+            # Output time-series "reconstructions" from our generator (if VRNN)
             if extra_model_outputs is not None:
                 # We'll get the decoder's mu and sigma from the evaluation/validation set since
                 # it's much larger than the training batches
@@ -284,15 +284,15 @@ def train(data_info,
                     x: eval_data_a, keep_prob: 1.0, training: False
                 })
 
-                plot_time_series(mu, sigma, title='VRNN Samples (source domain)',
-                    filename=embedding_prefix+"_samples_a.png")
+                plot_random_time_series(mu, sigma, title='VRNN Samples (source domain)',
+                    filename=embedding_prefix+"_reconstruction_a.png")
 
                 mu, sigma = sess.run(extra_model_outputs, feed_dict={
                     x: eval_data_b, keep_prob: 1.0, training: False
                 })
 
-                plot_time_series(mu, sigma, title='VRNN Samples (target domain)',
-                    filename=embedding_prefix+"_samples_b.png")
+                plot_random_time_series(mu, sigma, title='VRNN Samples (target domain)',
+                    filename=embedding_prefix+"_reconstruction_b.png")
 
 if __name__ == '__main__':
     # Used when training on Kamiak
