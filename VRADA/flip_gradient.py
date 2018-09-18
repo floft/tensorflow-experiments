@@ -1,8 +1,8 @@
-#
-# Gradient reversal layer
-#
-# Taken from: https://github.com/pumpikano/tf-dann/blob/master/flip_gradient.py
-#
+"""
+Gradient reversal layer
+
+Taken from: https://github.com/pumpikano/tf-dann/blob/master/flip_gradient.py
+"""
 
 from __future__ import absolute_import
 from __future__ import division
