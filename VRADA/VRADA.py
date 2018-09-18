@@ -1,9 +1,8 @@
-#!/usr/bin/env python
-#
-# VRADA
-#
-# See the paper: https://openreview.net/pdf?id=rk9eAFcxg
-#
+"""
+VRADA implementation
+
+See the paper: https://openreview.net/pdf?id=rk9eAFcxg
+"""
 import os
 import time
 import argparse
@@ -11,6 +10,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
 #from tensorflow.contrib.tensorboard.plugins import projector
 
 # Due to this being run on Kamiak, that doesn't have _tkinter, we have to set a
@@ -22,267 +22,24 @@ if os.environ.get('DISPLAY','') == '':
     mpl.use('Agg')
 import matplotlib.pyplot as plt
 
-from VRNN import VRNNCell
+from plot import plot_embedding
+from model import build_lstm, build_vrnn
 from load_data import IteratorInitializerHook, \
     load_data, one_hot, \
     domain_labels, _get_input_fn
-from flip_gradient import flip_gradient
-
-def build_rnn(x, keep_prob, layers):
-    """
-    Multi-layer LSTM
-    https://github.com/GarrettHoffman/lstm-oreilly
-
-    x, keep_prob - placeholders
-    layers - cell for each layer, e.g. [LSTMCell(...), LSTMCell(...), ...]
-    """
-
-    drops = [tf.contrib.rnn.DropoutWrapper(l, output_keep_prob=keep_prob) for l in layers]
-    cell = tf.contrib.rnn.MultiRNNCell(drops)
-
-    batch_size = tf.shape(x)[0]
-    initial_state = cell.zero_state(batch_size, tf.float32)
-
-    outputs, final_state = tf.nn.dynamic_rnn(cell, x, initial_state=initial_state)
-
-    return initial_state, outputs, cell, final_state
-
-def classifier(x, num_classes, trainable=True):
-    """
-    We'll use the same clasifier for task or domain classification
-
-    Returns both output without applying softmax for use in loss function
-    and after for use in prediction. See softmax_cross_entropy_with_logits_v2
-    documentation: "This op expects unscaled logits, ..."
-    """
-    classifier_output = tf.contrib.layers.fully_connected(
-            x, num_classes, activation_fn=None, scope="classifier",
-            trainable=trainable)
-    softmax_output = tf.nn.softmax(classifier_output, name="softmax")
-    
-    return classifier_output, softmax_output
-
-def lstm_model(x, y, domain, grl_lambda, keep_prob, training,
-    num_classes, num_features, adaptation=True):
-    """ Create an LSTM model as a baseline """
-    # Build the LSTM
-    with tf.variable_scope("rnn_model"):
-        initial_state, outputs, cell, final_state = build_rnn(x, keep_prob, [
-            #tf.contrib.rnn.BasicLSTMCell(128), tf.contrib.rnn.BasicLSTMCell(128),
-            tf.contrib.rnn.BasicLSTMCell(128),
-        ])
-
-    with tf.variable_scope("feature_extractor"):
-        # We'll only use the output at the last time step for classification
-        feature_extractor = outputs[:, -1]
-        feature_extractor = tf.contrib.layers.fully_connected(feature_extractor, 50)
-        feature_extractor = tf.nn.dropout(feature_extractor, keep_prob)
-        feature_extractor = tf.contrib.layers.fully_connected(feature_extractor, 25)
-        feature_extractor = tf.nn.dropout(feature_extractor, keep_prob)
-
-        # Use the RNN output for both domain and task inputs
-        task_input = feature_extractor
-        domain_input = feature_extractor
-
-    # Pass last output to fully connected then softmax to get class prediction
-    with tf.variable_scope("task_classifier"):
-        task_classifier, task_softmax = classifier(task_input, num_classes)
-
-    # Also pass output to domain classifier
-    # Note: always have 2 domains, so set outputs to 2
-    with tf.variable_scope("domain_classifier"):
-        gradient_reversal_layer = flip_gradient(domain_input, grl_lambda)
-        domain_classifier, domain_softmax = classifier(gradient_reversal_layer, 2)
-
-    # If doing domain adaptation, then we'll need to ignore the second half of the
-    # batch for task classification during training since we don't know the labels
-    # of the target data
-    if adaptation:
-        with tf.variable_scope("only_use_source_labels"):
-            # Note: this is twice the batch_size in the train() function since we cut
-            # it in half there -- this is the sum of both source and target data
-            batch_size = tf.shape(task_input)[0]
-
-            # Note: I'm doing this after the classification layers because if you do
-            # it before, then fully_connected complains that the last dimension is
-            # None (i.e. not known till we run the graph). Thus, we'll do it after
-            # all the fully-connected layers.
-            #
-            # Alternatively, I could do matmul(weights, task_input) + bias and store
-            # weights on my own if I do really need to do this at some point.
-            #
-            # See: https://github.com/pumpikano/tf-dann/blob/master/Blobs-DANN.ipynb
-            task_classifier = tf.cond(training,
-                lambda: tf.slice(task_classifier, [0, 0], [batch_size // 2, -1]),
-                lambda: task_classifier)
-            task_softmax = tf.cond(training,
-                lambda: tf.slice(task_softmax, [0, 0], [batch_size // 2, -1]),
-                lambda: task_softmax)
-            y = tf.cond(training,
-                lambda: tf.slice(y, [0, 0], [batch_size // 2, -1]),
-                lambda: y)
-
-    # Losses
-    with tf.variable_scope("task_loss"):
-        task_loss = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits_v2(
-            labels=y, logits=task_classifier))
-
-    with tf.variable_scope("domain_loss"):
-        domain_loss = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits_v2(
-            labels=domain, logits=domain_classifier))
-
-    #
-    # Extra summaries
-    #
-    summaries = [
-        #tf.summary.histogram("inputs/x", x),
-        #tf.summary.histogram("inputs/y", y),
-        #tf.summary.histogram("inputs/domain", domain),
-        #tf.summary.histogram("outputs/rnn", outputs[:, -1]),
-        tf.summary.histogram("outputs/feature_extractor", feature_extractor),
-        tf.summary.histogram("outputs/task_classifier", task_softmax),
-        tf.summary.histogram("outputs/domain_classifier", domain_softmax),
-    ]
-
-    return task_softmax, domain_softmax, task_loss, domain_loss, \
-        feature_extractor, summaries
-
-def vrnn_model(x, y, keep_prob, training, num_classes, num_features, eps=1e-9):
-    """ Create the VRNN model """
-    #
-    # Model
-    #
-    with tf.variable_scope("rnn_model"):
-        initial_state, outputs, cell, final_state = build_rnn(x, keep_prob, [
-            #VRNNCell(num_features, 128, 64), VRNNCell(128, 128, 64), # h_dim of l_i must be num_features of l_(i+1)
-            VRNNCell(num_features, 128, 10, training, batch_norm=False),
-        ])
-        # Note: if you try using more than one layer above, then you need to
-        # change the loss since for instance if you put an LSTM layer before
-        # the VRNN cell, then no longer is the input to the layer x as
-        # specified in the loss but now it's the output of the first LSTM layer
-        # that the VRNN layer should be learning how to reconstruct. Thus, for
-        # now I'll keep it simple and not have multiple layers.
-
-    h, c, \
-    encoder_mu, encoder_sigma, \
-    decoder_mu, decoder_sigma, \
-    prior_mu, prior_sigma, \
-    x_1, z_1, \
-        = outputs # TODO if multiple layers maybe do loss for each of these
-
-    with tf.variable_scope("classifier"):
-        # Pass last output to fully connected then softmax to get class prediction
-        output_for_classifier = h # h is the LSTM output
-        #output_for_classifier = z_1 # z is the latent variable
-        yhat = tf.contrib.layers.fully_connected(
-                output_for_classifier[:, -1], num_classes, activation_fn=tf.nn.softmax)
-
-    #
-    # Loss
-    #
-    # KL divergence
-    # https://stats.stackexchange.com/q/7440
-    # https://github.com/kimkilho/tensorflow-vrnn/blob/master/main.py
-    with tf.variable_scope("kl_gaussian"):
-        kl_loss = tf.reduce_mean(tf.reduce_mean(
-                tf.log(tf.maximum(eps, prior_sigma)) - tf.log(tf.maximum(eps, encoder_sigma))
-                + 0.5*(tf.square(encoder_sigma) + tf.square(encoder_mu - prior_mu))
-                    / tf.maximum(eps, tf.square(prior_sigma))
-                - 0.5,
-            axis=1), axis=1)
-
-    # Reshape [batch_size,time_steps,num_features] -> [batch_size*time_steps,num_features]
-    # so that (decoder_mu - x) will broadcast correctly
-    #x_transpose = tf.transpose(x, [0, 2, 1])
-    #decoder_mu_reshape = tf.reshape(decoder_mu, [tf.shape(decoder_mu)[0]*tf.shape(decoder_mu)[1], tf.shape(decoder_mu)[2]])
-    #x_reshape = tf.reshape(x, [tf.shape(x)[0]*tf.shape(x)[1], tf.shape(x)[2]])
-
-    # Negative log likelihood:
-    # https://papers.nips.cc/paper/7219-simple-and-scalable-predictive-uncertainty-estimation-using-deep-ensembles.pdf
-    # https://fairyonice.github.io/Create-a-neural-net-with-a-negative-log-likelihood-as-a-loss.html
-    with tf.variable_scope("negative_log_likelihood"):
-        #likelihood_loss = tf.reduce_sum(tf.squared_difference(x, x_1), 1)
-        likelihood_loss = 0.5*tf.reduce_mean(tf.reduce_mean(
-            tf.square(decoder_mu - x) / tf.maximum(eps, tf.square(decoder_sigma))
-            + tf.log(tf.maximum(eps, tf.square(decoder_sigma))),
-        axis=1), axis=1)
-
-    # We'd also like to classify well
-    categorical_loss = tf.nn.softmax_cross_entropy_with_logits_v2(labels=y, logits=yhat)
-
-    loss = tf.reduce_mean(kl_loss + likelihood_loss + categorical_loss)
-
-    #
-    # Extra summaries
-    #
-    summaries = [
-        tf.summary.scalar("loss/kl", tf.reduce_mean(kl_loss)),
-        tf.summary.scalar("loss/likelihood", tf.reduce_mean(likelihood_loss)),
-        tf.summary.scalar("loss/categorical", tf.reduce_mean(categorical_loss)),
-        tf.summary.histogram("outputs/phi_x", x_1),
-        tf.summary.histogram("outputs/phi_z", z_1),
-        tf.summary.histogram("encoder/mu", encoder_mu),
-        tf.summary.histogram("encoder/sigma", encoder_sigma),
-        tf.summary.histogram("decoder/mu", decoder_mu),
-        tf.summary.histogram("decoder/sigma", decoder_sigma),
-        tf.summary.histogram("prior/mu", prior_mu),
-        tf.summary.histogram("prior/sigma", prior_sigma),
-    ]
-
-    return yhat, loss, summaries
-
-def plot_embedding(x, y, d, title=None, filename=None):
-    """
-    Plot an embedding X with the class label y colored by the domain d.
-    
-    From: https://github.com/pumpikano/tf-dann/blob/master/utils.py
-    """
-    x_min, x_max = np.min(x, 0), np.max(x, 0)
-    x = (x - x_min) / (x_max - x_min)
-
-    #colors = ["xkcd:orange", "xkcd:teal", "xkcd:darkgreen", "xkcd:orchid", "xkcd:blue", "xkcd:indigo"]
-
-    colors = {
-        (0, 0): 'xkcd:orange', # source 0
-        (0, 1): 'xkcd:teal', # source 1
-        (1, 0): 'xkcd:darkgreen', # target 0
-        (1, 1): 'xkcd:indigo', # target 1
-    }
-
-    domain = {
-        0: 'S',
-        1: 'T',
-    }
-
-    # Plot colors numbers
-    plt.figure(figsize=(10,10))
-    ax = plt.subplot(111)
-    for i in range(x.shape[0]):
-        # plot colored number
-        plt.text(x[i, 0], x[i, 1], domain[d[i]]+str(y[i]),
-                 color=colors[(d[i], y[i])],
-                 fontdict={'weight': 'bold', 'size': 9})
-
-    plt.xticks([]), plt.yticks([])
-
-    if title is not None:
-        plt.title(title)
-
-    if filename is not None:
-        plt.savefig(filename, bbox_inches='tight', pad_inches=0, transparent=True)
 
 def train(data_info,
         features_a, labels_a, test_features_a, test_labels_a,
         features_b, labels_b, test_features_b, test_labels_b,
-        model_func=lstm_model,
+        model_func=build_lstm,
         batch_size=128,
-        num_steps=10000,
-        learning_rate=0.001,
-        dropout_keep_prob=0.8,
+        num_steps=1000,
+        learning_rate=0.0003,
+        dropout_keep_prob=1.0, # TODO
+        max_grl_lambda=1, # probably 1 is the best...
         model_dir="models",
         log_dir="logs",
-        tsne_filename=None,
+        embedding_prefix=None,
         model_save_steps=100,
         log_save_steps=1,
         log_extra_save_steps=25,
@@ -336,18 +93,14 @@ def train(data_info,
     eval_source_domain = domain_labels(0, test_features_a.shape[0])
     eval_target_domain = domain_labels(1, test_features_b.shape[0])
 
-    # Model and loss -- e.g. lstm_model
+    # Model, loss, feature extractor output -- e.g. using build_lstm or build_vrnn
     #
     # Optionally also returns additional summaries to log, e.g. loss components
     task_classifier, domain_classifier, \
-    task_loss, domain_loss, \
+    task_loss, domain_loss, total_loss, \
     feature_extractor, model_summaries = \
         model_func(x, y, domain, grl_lambda, keep_prob, training,
             num_classes, num_features, adaptation)
-
-    # Total loss is the sum
-    with tf.variable_scope("total_loss"):
-        total_loss = task_loss + domain_loss
 
     # Accuracy of the classifiers -- https://stackoverflow.com/a/42608050/2698494
     with tf.variable_scope("task_accuracy"):
@@ -417,7 +170,7 @@ def train(data_info,
 
             # GRL schedule from
             # https://github.com/pumpikano/tf-dann/blob/master/Blobs-DANN.ipynb
-            grl_lambda_value = 2/(1+np.exp(-10*(i/(num_steps+1))))-1
+            grl_lambda_value = (max_grl_lambda+1)/(1+np.exp(-10*(i/(num_steps+1))))-1
 
             t = time.time()
             step = sess.run(inc_global_step)
@@ -499,27 +252,34 @@ def train(data_info,
         #
         # Maybe in the future it would be cool to use TensorFlow's projector in TensorBoard
         # https://medium.com/@vegi/visualizing-higher-dimensional-data-using-t-sne-on-tensorboard-7dbf22682cf2
-        if tsne_filename is not None:
+        if embedding_prefix is not None:
             combined_x = np.concatenate((eval_data_a, eval_data_b), axis=0)
             combined_labels = np.concatenate((eval_labels_a, eval_labels_b), axis=0)
             combined_domain = np.concatenate((eval_source_domain, eval_target_domain), axis=0)
 
+            """
             if os.path.exists(tsne_filename+'_tsne_fit.npy'):
                 print("Note: generating t-SNE plot using using pre-existing embedding")
-                tsne_fit = np.load(tsne_filename+'_tsne_fit.npy')
+                tsne = np.load(tsne_filename+'_tsne_fit.npy')
+                pca = np.load(tsne_filename+'_pca_fit.npy')
             else:
                 print("Note: did not find t-SNE weights -- recreating")
+            
+            np.save(tsne_filename+'_tsne_fit', tsne)
+            np.save(tsne_filename+'_pca_fit', pca)
+            """
 
-                embedding = sess.run(feature_extractor, feed_dict={
-                    x: combined_x, keep_prob: 1.0, training: False
-                })
+            embedding = sess.run(feature_extractor, feed_dict={
+                x: combined_x, keep_prob: 1.0, training: False
+            })
 
-                tsne = TSNE(perplexity=30, n_components=2, init='pca', n_iter=3000)
-                tsne_fit = tsne.fit_transform(embedding)
-                np.save(tsne_filename+'_tsne_fit', tsne_fit)
+            tsne = TSNE(n_components=2, init='pca', n_iter=3000).fit_transform(embedding)
+            pca = PCA(n_components=2).fit_transform(embedding)
 
-            plot_embedding(tsne_fit, combined_labels.argmax(1), combined_domain.argmax(1),
-                title='Domain Adaptation', filename=tsne_filename)
+            plot_embedding(tsne, combined_labels.argmax(1), combined_domain.argmax(1),
+                title='Domain Adaptation', filename=embedding_prefix+"_tsne.png")
+            plot_embedding(pca, combined_labels.argmax(1), combined_domain.argmax(1),
+                title='Domain Adaptation', filename=embedding_prefix+"_pca.png")
 
 if __name__ == '__main__':
     # Used when training on Kamiak
@@ -551,28 +311,34 @@ if __name__ == '__main__':
     train_data_b, train_labels_b = one_hot(train_data_b, train_labels_b, num_classes)
     test_data_b, test_labels_b = one_hot(test_data_b, test_labels_b, num_classes)
 
+    attempt = 6
+
     # Train and evaluate LSTM - i.e. no adaptation
+    """
     train(data_info,
             train_data_a, train_labels_a, test_data_a, test_labels_a,
             train_data_b, train_labels_b, test_data_b, test_labels_b,
-            model_func=lstm_model,
-            model_dir=args.modeldir,
-            log_dir=args.logdir,
-            tsne_filename='lstm_tsne.png',
-            #model_dir="offset-models/lstm-da4-models",
-            #log_dir="offset/lstm-da4-logs",
+            model_func=build_lstm,
+            #model_dir=args.modeldir,
+            #log_dir=args.logdir,
+            embedding_prefix="lstm_da_"+str(attempt),
+            model_dir="offset-models/lstm-da"+str(attempt)+"-models",
+            log_dir="offset/lstm-da"+str(attempt)+"-logs",
             adaptation=True)
+    """
     #tf.reset_default_graph()
 
+    attempt = 1
+
     # Train and evaluate VRNN - i.e. no adaptation
-    """
     train(data_info,
             train_data_a, train_labels_a, test_data_a, test_labels_a,
             train_data_b, train_labels_b, test_data_b, test_labels_b,
-            model_func=vrnn_model,
-            model_dir="plane-test-models/vrnn-da-models",
-            log_dir="plane-test/vrnn-da-logs")
-    """
+            model_func=build_vrnn,
+            embedding_prefix="vrnn_"+str(attempt),
+            model_dir="offset-models/vrnn-"+str(attempt)+"-models",
+            log_dir="offset/vrnn-"+str(attempt)+"-logs",
+            adaptation=False)
 
     # Train and evaluate VRADA - i.e. VRNN but with adversarial domain adaptation
     """

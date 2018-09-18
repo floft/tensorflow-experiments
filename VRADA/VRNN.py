@@ -1,10 +1,14 @@
+"""
+VRNN implementation
+
+Based on:
+ - https://github.com/phreeza/tensorflow-vrnn/blob/master/model_vrnn.py
+ - https://github.com/kimkilho/tensorflow-vrnn/blob/master/cell.py
+ - https://github.com/kimkilho/tensorflow-vrnn/blob/master/main.py
+ - https://github.com/tensorflow/tensorflow/blob/r1.10/tensorflow/python/ops/rnn_cell_impl.py
+"""
 import tensorflow as tf
 
-# Implementing VRNN. Based on:
-#  - https://github.com/phreeza/tensorflow-vrnn/blob/master/model_vrnn.py
-#  - https://github.com/kimkilho/tensorflow-vrnn/blob/master/cell.py
-#  - https://github.com/kimkilho/tensorflow-vrnn/blob/master/main.py
-#  - https://github.com/tensorflow/tensorflow/blob/r1.10/tensorflow/python/ops/rnn_cell_impl.py
 class VRNNCell(tf.contrib.rnn.LayerRNNCell):
     def __init__(self, x_dim, h_dim, z_dim, training, batch_norm=False, **kwargs):
         self.batch_norm = batch_norm
