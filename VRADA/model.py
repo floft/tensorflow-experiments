@@ -125,17 +125,10 @@ def build_model(x, y, domain, grl_lambda, keep_prob, training,
         domain_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(
             labels=domain, logits=domain_classifier))
 
-    #
     # Extra summaries
-    #
     summaries = [
-        #tf.summary.histogram("inputs/x", x),
-        #tf.summary.histogram("inputs/y", y),
-        #tf.summary.histogram("inputs/domain", domain),
-        #tf.summary.histogram("outputs/rnn", outputs[:, -1]),
-        tf.summary.histogram("outputs/feature_extractor", feature_extractor),
-        tf.summary.histogram("outputs/task_classifier", task_softmax),
-        tf.summary.histogram("outputs/domain_classifier", domain_softmax),
+        tf.summary.scalar("loss/task_loss", task_loss),
+        tf.summary.scalar("loss/domain_loss", domain_loss),
     ]
 
     return task_softmax, domain_softmax, task_loss, domain_loss, \
@@ -160,10 +153,18 @@ def build_lstm(x, y, domain, grl_lambda, keep_prob, training,
 
     # Total loss is the sum
     with tf.variable_scope("total_loss"):
-        total_loss = task_loss + domain_loss
+        total_loss = task_loss
 
-    return task_softmax, domain_softmax, \
-        task_loss, domain_loss, total_loss, \
+        if adaptation:
+            total_loss += domain_loss
+    
+    summaries += [
+        tf.summary.histogram("outputs/feature_extractor", feature_extractor),
+        tf.summary.histogram("outputs/task_classifier", task_softmax),
+        tf.summary.histogram("outputs/domain_classifier", domain_softmax),
+    ]
+
+    return task_softmax, domain_softmax, total_loss, \
         feature_extractor, summaries
 
 def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
@@ -172,7 +173,7 @@ def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
     # Build VRNN
     with tf.variable_scope("rnn_model"):
         initial_state, outputs, cell, final_state = build_rnn(x, keep_prob, [
-            VRNNCell(num_features, 100, 10, training, batch_norm=False),
+            VRNNCell(num_features, 100, 100, training, batch_norm=False),
         ])
         # Note: if you try using more than one layer above, then you need to
         # change the loss since for instance if you put an LSTM layer before
@@ -188,7 +189,7 @@ def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
         x_1, z_1, \
             = outputs
 
-        rnn_output = h[:,-1] # TODO VRADA actually uses z?
+        rnn_output = z_1[:,-1] # VRADA uses z not h
 
     # Other model components passing in output from RNN
     task_softmax, domain_softmax, task_loss, domain_loss, \
@@ -227,8 +228,10 @@ def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
 
     # Total loss is sum of all of them
     with tf.variable_scope("total_loss"):
-        total_loss = task_loss + domain_loss \
-            + tf.reduce_mean(kl_loss) + tf.reduce_mean(likelihood_loss)
+        total_loss = task_loss + tf.reduce_mean(kl_loss) + tf.reduce_mean(likelihood_loss)
+        
+        if adaptation:
+            total_loss += domain_loss
 
     # Extra summaries
     summaries += [
@@ -244,6 +247,5 @@ def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
         tf.summary.histogram("prior/sigma", prior_sigma),
     ]
 
-    return task_softmax, domain_softmax, \
-        task_loss, domain_loss, total_loss, \
+    return task_softmax, domain_softmax, total_loss, \
         feature_extractor, summaries

@@ -2,6 +2,7 @@
 VRADA implementation
 
 See the paper: https://openreview.net/pdf?id=rk9eAFcxg
+See coauthor blog post: https://wcarvalho.github.io/research/2017/04/23/vrada/
 """
 import os
 import time
@@ -82,7 +83,7 @@ def train(data_info,
     domain = tf.placeholder(tf.float32, [None, 2], name='domain') # which domain
     y = tf.placeholder(tf.float32, [None, num_classes], name='y') # class 1, 2, etc. one-hot
     training = tf.placeholder(tf.bool, name='training') # whether we're training (batch norm)
-    grl_lambda = tf.placeholder(tf.float32, shape=()) # multiple for gradient reversal layer
+    grl_lambda = tf.placeholder_with_default(1.0, shape=()) # gradient multiplier for gradient reversal layer
 
     # Source domain will be [[1,0], [1,0], ...] and target domain [[0,1], [0,1], ...]
     #
@@ -96,8 +97,7 @@ def train(data_info,
     # Model, loss, feature extractor output -- e.g. using build_lstm or build_vrnn
     #
     # Optionally also returns additional summaries to log, e.g. loss components
-    task_classifier, domain_classifier, \
-    task_loss, domain_loss, total_loss, \
+    task_classifier, domain_classifier, total_loss, \
     feature_extractor, model_summaries = \
         model_func(x, y, domain, grl_lambda, keep_prob, training,
             num_classes, num_features, adaptation)
@@ -114,16 +114,11 @@ def train(data_info,
 
     # Optimizer - update ops for batch norm (not sure batch norm is working though...)
     with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS, "rnn_model")):
-        # If no adaptation, only optimize for task
-        task_optimizer = tf.train.AdamOptimizer(learning_rate).minimize(task_loss)
-        # If adaptation, optimize both for task and adversarial domain classifier too
-        total_optimizer = tf.train.AdamOptimizer(learning_rate).minimize(total_loss)
+        optimizer = tf.train.AdamOptimizer(learning_rate).minimize(total_loss)
 
     # Summaries - training and evaluation for both domains A and B
     training_summaries_a = tf.summary.merge([
-        tf.summary.scalar("loss/task_loss", tf.reduce_mean(task_loss)),
-        tf.summary.scalar("loss/domain_loss", tf.reduce_mean(domain_loss)),
-        tf.summary.scalar("loss/total_loss", tf.reduce_mean(total_loss)),
+        tf.summary.scalar("loss/total_loss", total_loss),
         tf.summary.scalar("accuracy/task/source/training", task_accuracy),
         tf.summary.scalar("accuracy/domain/source/training", domain_accuracy),
     ])
@@ -189,14 +184,14 @@ def train(data_info,
                 combined_labels = np.concatenate((labels_batch_a, np.zeros(labels_batch_b.shape)), axis=0)
                 combined_domain = np.concatenate((source_domain, target_domain), axis=0)
 
-                sess.run(total_optimizer, feed_dict={
+                sess.run(optimizer, feed_dict={
                     x: combined_x, y: combined_labels, domain: combined_domain,
                     grl_lambda: grl_lambda_value,
                     keep_prob: dropout_keep_prob, training: True
                 })
             else:
                 # Train task classifier on source domain to be correct
-                sess.run(task_optimizer, feed_dict={
+                sess.run(optimizer, feed_dict={
                     x: data_batch_a, y: labels_batch_a,
                     keep_prob: dropout_keep_prob, training: True
                 })
@@ -328,17 +323,17 @@ if __name__ == '__main__':
     """
     #tf.reset_default_graph()
 
-    attempt = 1
+    attempt = 4
 
     # Train and evaluate VRNN - i.e. no adaptation
     train(data_info,
             train_data_a, train_labels_a, test_data_a, test_labels_a,
             train_data_b, train_labels_b, test_data_b, test_labels_b,
             model_func=build_vrnn,
-            embedding_prefix="vrnn_"+str(attempt),
-            model_dir="offset-models/vrnn-"+str(attempt)+"-models",
-            log_dir="offset/vrnn-"+str(attempt)+"-logs",
-            adaptation=False)
+            embedding_prefix="vrnn_da_"+str(attempt),
+            model_dir="offset-models/vrnn-da"+str(attempt)+"-models",
+            log_dir="offset/vrnn-da"+str(attempt)+"-logs",
+            adaptation=True)
 
     # Train and evaluate VRADA - i.e. VRNN but with adversarial domain adaptation
     """
