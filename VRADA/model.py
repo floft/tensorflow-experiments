@@ -17,8 +17,10 @@ def build_rnn(x, keep_prob, layers):
     layers - cell for each layer, e.g. [LSTMCell(...), LSTMCell(...), ...]
     """
 
-    drops = [tf.contrib.rnn.DropoutWrapper(l, output_keep_prob=keep_prob) for l in layers]
-    cell = tf.contrib.rnn.MultiRNNCell(drops)
+    #drops = [tf.contrib.rnn.DropoutWrapper(l, output_keep_prob=keep_prob) for l in layers]
+    #cell = tf.contrib.rnn.MultiRNNCell(drops)
+    #cell = tf.contrib.rnn.MultiRNNCell(layers)
+    cell = layers[0] # We won't use multiple layers at the moment
 
     batch_size = tf.shape(x)[0]
     initial_state = cell.zero_state(batch_size, tf.float32)
@@ -31,20 +33,39 @@ def classifier(x, num_classes, keep_prob=None):
     """
     We'll use the same clasifier for task or domain classification
 
+    Same as was used in the VRADA paper (see paper appendix)
+
     Returns both output without applying softmax for use in loss function
     and after for use in prediction. See softmax_cross_entropy_with_logits_v2
     documentation: "This op expects unscaled logits, ..."
     """
-    classifier_output = tf.contrib.layers.fully_connected(
-            x, num_classes, activation_fn=None, scope="classifier")
-    if keep_prob is not None:
-        classifier_output = tf.nn.dropout(classifier_output, keep_prob)
-    softmax_output = tf.nn.softmax(classifier_output, name="softmax")
+    with tf.variable_scope("classifier"):
+        classifier_output = tf.contrib.layers.fully_connected(
+                x, 50, activation_fn=tf.nn.relu)
+        if keep_prob is not None:
+            classifier_output = tf.nn.dropout(classifier_output, keep_prob)
+
+        classifier_output = tf.contrib.layers.fully_connected(
+                classifier_output, 50, activation_fn=tf.nn.relu)
+        if keep_prob is not None:
+            classifier_output = tf.nn.dropout(classifier_output, keep_prob)
+
+        classifier_output = tf.contrib.layers.fully_connected(
+                classifier_output, 50, activation_fn=tf.nn.relu)
+        if keep_prob is not None:
+            classifier_output = tf.nn.dropout(classifier_output, keep_prob)
+
+        classifier_output = tf.contrib.layers.fully_connected(
+                classifier_output, num_classes, activation_fn=None)
+        if keep_prob is not None:
+            classifier_output = tf.nn.dropout(classifier_output, keep_prob)
+        
+        softmax_output = tf.nn.softmax(classifier_output)
     
     return classifier_output, softmax_output
 
 def build_model(x, y, domain, grl_lambda, keep_prob, training,
-        num_classes, adaptation=True):
+        num_classes, adaptation=True, two_domain_classifiers=False):
     """
     Creates the feature extractor, task classifier, domain classifier
 
@@ -67,26 +88,28 @@ def build_model(x, y, domain, grl_lambda, keep_prob, training,
         # We'll only use the output at the last time step for classification
         feature_extractor = x
         #feature_extractor = tf.reshape(x, [tf.shape(x)[0], 25]) # alternatively, bypass RNN and just use dense
-        feature_extractor = tf.contrib.layers.fully_connected(feature_extractor, 50)
+        feature_extractor = tf.contrib.layers.fully_connected(feature_extractor, 100)
         feature_extractor = tf.nn.dropout(feature_extractor, keep_prob)
-        feature_extractor = tf.contrib.layers.fully_connected(feature_extractor, 25)
+        feature_extractor = tf.contrib.layers.fully_connected(feature_extractor, 100)
         feature_extractor = tf.nn.dropout(feature_extractor, keep_prob)
-
-        # Use the RNN output for both domain and task inputs
-        task_input = feature_extractor
-        domain_input = feature_extractor
+        feature_extractor = tf.contrib.layers.fully_connected(feature_extractor, 100)
+        feature_extractor = tf.nn.dropout(feature_extractor, keep_prob)
 
     # Pass last output to fully connected then softmax to get class prediction
     with tf.variable_scope("task_classifier"):
-        task_classifier, task_softmax = classifier(task_input, num_classes, keep_prob)
+        task_classifier, task_softmax = classifier(feature_extractor, num_classes, keep_prob)
 
     # Also pass output to domain classifier
     # Note: always have 2 domains, so set outputs to 2
     with tf.variable_scope("domain_classifier"):
-        gradient_reversal_layer = flip_gradient(domain_input, grl_lambda)
-        domain_classifier = tf.contrib.layers.fully_connected(gradient_reversal_layer, 15)
-        domain_classifier = tf.nn.dropout(domain_classifier, keep_prob)
-        domain_classifier, domain_softmax = classifier(domain_classifier, 2, keep_prob)
+        gradient_reversal_layer = flip_gradient(feature_extractor, grl_lambda)
+        domain_classifier, domain_softmax = classifier(gradient_reversal_layer, 2, keep_prob)
+
+    # Maybe try one before the feature extractor too
+    if two_domain_classifiers:
+        with tf.variable_scope("domain_classifier2"):
+            gradient_reversal_layer2 = flip_gradient(x, grl_lambda)
+            domain_classifier2, domain_softmax2 = classifier(gradient_reversal_layer2, 2, keep_prob)
 
     # If doing domain adaptation, then we'll need to ignore the second half of the
     # batch for task classification during training since we don't know the labels
@@ -95,7 +118,7 @@ def build_model(x, y, domain, grl_lambda, keep_prob, training,
         with tf.variable_scope("only_use_source_labels"):
             # Note: this is twice the batch_size in the train() function since we cut
             # it in half there -- this is the sum of both source and target data
-            batch_size = tf.shape(task_input)[0]
+            batch_size = tf.shape(feature_extractor)[0]
 
             # Note: I'm doing this after the classification layers because if you do
             # it before, then fully_connected complains that the last dimension is
@@ -119,11 +142,15 @@ def build_model(x, y, domain, grl_lambda, keep_prob, training,
     # Losses
     with tf.variable_scope("task_loss"):
         task_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(
-            labels=y, logits=task_classifier))
+            labels=tf.stop_gradient(y), logits=task_classifier))
 
     with tf.variable_scope("domain_loss"):
         domain_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(
-            labels=domain, logits=domain_classifier))
+            labels=tf.stop_gradient(domain), logits=domain_classifier))
+        
+        if two_domain_classifiers:
+            domain_loss += tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(
+                labels=tf.stop_gradient(domain), logits=domain_classifier2))
 
     # Extra summaries
     summaries = [
@@ -140,7 +167,9 @@ def build_lstm(x, y, domain, grl_lambda, keep_prob, training,
     # Build LSTM
     with tf.variable_scope("rnn_model"):
         initial_state, outputs, cell, final_state = build_rnn(x, keep_prob, [
-            tf.contrib.rnn.BasicLSTMCell(100),
+            tf.contrib.rnn.BasicLSTMCell(50),
+            #tf.contrib.rnn.LSTMCell(100),
+            #tf.contrib.rnn.LSTMCell(100, use_peepholes=True),
         ])
 
         rnn_output = outputs[:, -1]
@@ -167,16 +196,16 @@ def build_lstm(x, y, domain, grl_lambda, keep_prob, training,
     # We can't generate with an LSTM
     extra_outputs = None
 
-    return task_softmax, domain_softmax, total_loss, \
+    return task_softmax, domain_softmax, total_loss, domain_loss, \
         feature_extractor, summaries, extra_outputs
 
 def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
-            num_classes, num_features, adaptation, eps=1e-9):
+            num_classes, num_features, adaptation, eps=1e-9, use_z=True):
     """ VRNN model """
     # Build VRNN
     with tf.variable_scope("rnn_model"):
         initial_state, outputs, cell, final_state = build_rnn(x, keep_prob, [
-            VRNNCell(num_features, 100, 50, training, batch_norm=False),
+            VRNNCell(num_features, 100, 100, training, batch_norm=False),
         ])
         # Note: if you try using more than one layer above, then you need to
         # change the loss since for instance if you put an LSTM layer before
@@ -192,7 +221,11 @@ def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
         x_1, z_1, \
             = outputs
 
-        rnn_output = z_1[:,-1] # VRADA uses z not h
+        # VRADA uses z not h
+        if use_z:
+            rnn_output = z_1[:,-1]
+        else:
+            rnn_output = h[:,-1]
 
     # Other model components passing in output from RNN
     task_softmax, domain_softmax, task_loss, domain_loss, \
@@ -255,5 +288,5 @@ def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
         decoder_mu, decoder_sigma,
     ]
 
-    return task_softmax, domain_softmax, total_loss, \
+    return task_softmax, domain_softmax, total_loss, domain_loss, \
         feature_extractor, summaries, extra_outputs

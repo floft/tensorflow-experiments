@@ -5,8 +5,10 @@ See the paper: https://openreview.net/pdf?id=rk9eAFcxg
 See coauthor blog post: https://wcarvalho.github.io/research/2017/04/23/vrada/
 """
 import os
+import re
 import time
 import argparse
+import pathlib
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -36,13 +38,12 @@ def train(data_info,
         batch_size=128,
         num_steps=1000,
         learning_rate=0.0003,
-        dropout_keep_prob=1.0, # TODO
-        max_grl_lambda=1, # probably 1 is the best...
+        dropout_keep_prob=0.8,
         model_dir="models",
         log_dir="logs",
         embedding_prefix=None,
-        model_save_steps=100,
-        log_save_steps=1,
+        model_save_steps=200,
+        log_save_steps=5,
         log_extra_save_steps=25,
         adaptation=True):
 
@@ -84,6 +85,7 @@ def train(data_info,
     y = tf.placeholder(tf.float32, [None, num_classes], name='y') # class 1, 2, etc. one-hot
     training = tf.placeholder(tf.bool, name='training') # whether we're training (batch norm)
     grl_lambda = tf.placeholder_with_default(1.0, shape=()) # gradient multiplier for gradient reversal layer
+    lr = tf.placeholder(tf.float32, (), name='learning_rate')
 
     # Source domain will be [[1,0], [1,0], ...] and target domain [[0,1], [0,1], ...]
     #
@@ -97,7 +99,7 @@ def train(data_info,
     # Model, loss, feature extractor output -- e.g. using build_lstm or build_vrnn
     #
     # Optionally also returns additional summaries to log, e.g. loss components
-    task_classifier, domain_classifier, total_loss, \
+    task_classifier, domain_classifier, total_loss, domain_loss, \
     feature_extractor, model_summaries, extra_model_outputs = \
         model_func(x, y, domain, grl_lambda, keep_prob, training,
             num_classes, num_features, adaptation)
@@ -111,10 +113,24 @@ def train(data_info,
         domain_accuracy = tf.reduce_mean(tf.cast(
             tf.equal(tf.argmax(domain, axis=-1), tf.argmax(domain_classifier, axis=-1)),
         tf.float32))
+    
+    # Get variables of model
+    variables = tf.trainable_variables()
+    rnn_vars = [v for v in variables if 'rnn_model' in v.name]
+    feature_extractor_vars = [v for v in variables if 'feature_extractor' in v.name]
+    task_classifier_vars = [v for v in variables if 'task_classifier' in v.name]
+    domain_classifier_vars = [v for v in variables if 'domain_classifier' in v.name]
 
     # Optimizer - update ops for batch norm (not sure batch norm is working though...)
-    with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS, "rnn_model")):
-        optimizer = tf.train.AdamOptimizer(learning_rate).minimize(total_loss)
+    #with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS, "rnn_model")):
+    optimizer = tf.train.AdamOptimizer(lr)
+    train_all = optimizer.minimize(total_loss)
+    train_notdomain = optimizer.minimize(total_loss,
+        var_list=rnn_vars+feature_extractor_vars+task_classifier_vars)
+
+    if adaptation:
+        train_domain = optimizer.minimize(total_loss,
+            var_list=domain_classifier_vars)
 
     # Summaries - training and evaluation for both domains A and B
     training_summaries_a = tf.summary.merge([
@@ -163,9 +179,10 @@ def train(data_info,
             if i == 0:
                 writer.add_graph(sess.graph)
 
-            # GRL schedule from
-            # https://github.com/pumpikano/tf-dann/blob/master/Blobs-DANN.ipynb
-            grl_lambda_value = (max_grl_lambda+1)/(1+np.exp(-10*(i/(num_steps+1))))-1
+            # GRL schedule and learning rate schedule from DANN paper
+            grl_lambda_value = 2/(1+np.exp(-10*(i/(num_steps+1))))-1
+            #lr_value = 0.001/(1.0+10*i/(num_steps+1))**0.75
+            lr_value = learning_rate
 
             t = time.time()
             step = sess.run(inc_global_step)
@@ -184,16 +201,23 @@ def train(data_info,
                 combined_labels = np.concatenate((labels_batch_a, np.zeros(labels_batch_b.shape)), axis=0)
                 combined_domain = np.concatenate((source_domain, target_domain), axis=0)
 
-                sess.run(optimizer, feed_dict={
+                feed_dict = {
                     x: combined_x, y: combined_labels, domain: combined_domain,
                     grl_lambda: grl_lambda_value,
-                    keep_prob: dropout_keep_prob, training: True
-                })
+                    keep_prob: dropout_keep_prob, lr: lr_value, training: True
+                }
+
+                # In the paper they split optimization into two parts
+                #sess.run(train_notdomain, feed_dict=feed_dict)
+                #sess.run(train_domain, feed_dict=feed_dict)
+
+                # Or, train everything in one step which should give a similar result
+                sess.run(train_all, feed_dict=feed_dict)
             else:
                 # Train task classifier on source domain to be correct
-                sess.run(optimizer, feed_dict={
+                sess.run(train_notdomain, feed_dict={
                     x: data_batch_a, y: labels_batch_a,
-                    keep_prob: dropout_keep_prob, training: True
+                    keep_prob: dropout_keep_prob, lr: lr_value, training: True
                 })
 
             t = time.time() - t
@@ -294,6 +318,25 @@ def train(data_info,
                 plot_random_time_series(mu, sigma, title='VRNN Samples (target domain)',
                     filename=embedding_prefix+"_reconstruction_b.png")
 
+def last_modified_number(dir_name, glob):
+    """
+    Looks in dir_name at all files matching glob and takes number
+    from the one last modified
+    """
+    files = pathlib.Path(dir_name).glob(glob)
+    files = sorted(files, key=lambda cp:cp.stat().st_mtime)
+    
+    if len(files) > 0:
+        # Get number from filename
+        regex = re.compile(r'\d+')
+        numbers = [int(x) for x in regex.findall(str(files[-1]))]
+        assert len(numbers) == 1, "Could not determine number from last modified file"
+        last = numbers[0]
+
+        return last
+    
+    return None
+
 if __name__ == '__main__':
     # Used when training on Kamiak
     parser = argparse.ArgumentParser()
@@ -304,13 +347,30 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Load datasets - domains A & B
+
+    # Noisy - sine dataset
+    # train_data_a, train_labels_a = load_data("trivial/positive_sine_TRAIN")
+    # test_data_a, test_labels_a = load_data("trivial/positive_sine_TEST")
+    # train_data_b, train_labels_b = load_data("trivial/positive_sine_noise_TRAIN")
+    # test_data_b, test_labels_b = load_data("trivial/positive_sine_noise_TEST")
+
+    # Change in y-intercept - sine dataset - doesn't work
+    # train_data_a, train_labels_a = load_data("trivial/positive_sine_TRAIN")
+    # test_data_a, test_labels_a = load_data("trivial/positive_sine_TEST")
+    # train_data_b, train_labels_b = load_data("trivial/positive_sine_low_TRAIN")
+    # test_data_b, test_labels_b = load_data("trivial/positive_sine_low_TEST")
+
+    # Change in y-intercept - domain adaptation doesn't work
     train_data_a, train_labels_a = load_data("trivial/positive_slope_TRAIN")
     test_data_a, test_labels_a = load_data("trivial/positive_slope_TEST")
-
-    #train_data_b, train_labels_b = load_data("trivial/positive_sine_TRAIN")
-    #test_data_b, test_labels_b = load_data("trivial/positive_sine_TEST")
     train_data_b, train_labels_b = load_data("trivial/positive_slope_low_TRAIN")
     test_data_b, test_labels_b = load_data("trivial/positive_slope_low_TEST")
+    
+    # Noisy - no problem even without adaptation
+    # train_data_a, train_labels_a = load_data("trivial/positive_slope_TRAIN")
+    # test_data_a, test_labels_a = load_data("trivial/positive_slope_TEST")
+    # train_data_b, train_labels_b = load_data("trivial/positive_slope_noise_TRAIN")
+    # test_data_b, test_labels_b = load_data("trivial/positive_slope_noise_TEST")
 
     # Information about dataset - at the moment these are the same for both domains
     num_features = 1
@@ -324,34 +384,43 @@ if __name__ == '__main__':
     train_data_b, train_labels_b = one_hot(train_data_b, train_labels_b, num_classes)
     test_data_b, test_labels_b = one_hot(test_data_b, test_labels_b, num_classes)
 
-    attempt = 6
+    # Train and evaluate LSTM
+    attempt = last_modified_number("offset", "lstm-*-logs") + 1
+    assert attempt is not None
 
-    # Train and evaluate LSTM - i.e. no adaptation
-    """
     train(data_info,
             train_data_a, train_labels_a, test_data_a, test_labels_a,
             train_data_b, train_labels_b, test_data_b, test_labels_b,
             model_func=build_lstm,
-            #model_dir=args.modeldir,
-            #log_dir=args.logdir,
             embedding_prefix="lstm_da_"+str(attempt),
             model_dir="offset-models/lstm-da"+str(attempt)+"-models",
             log_dir="offset/lstm-da"+str(attempt)+"-logs",
             adaptation=True)
-    """
+
+    # train(data_info,
+    #         train_data_a, train_labels_a, test_data_a, test_labels_a,
+    #         train_data_b, train_labels_b, test_data_b, test_labels_b,
+    #         model_func=build_lstm,
+    #         embedding_prefix="lstm_"+str(attempt),
+    #         model_dir="offset-models/lstm-"+str(attempt)+"-models",
+    #         log_dir="offset/lstm-"+str(attempt)+"-logs",
+    #         adaptation=False)
+    
     #tf.reset_default_graph()
+    
 
-    attempt = 6
-
-    # Train and evaluate VRNN - i.e. no adaptation
-    train(data_info,
-            train_data_a, train_labels_a, test_data_a, test_labels_a,
-            train_data_b, train_labels_b, test_data_b, test_labels_b,
-            model_func=build_vrnn,
-            embedding_prefix="vrnn_da_"+str(attempt),
-            model_dir="offset-models/vrnn-da"+str(attempt)+"-models",
-            log_dir="offset/vrnn-da"+str(attempt)+"-logs",
-            adaptation=True)
+    # Train and evaluate VRNN
+    # attempt = last_modified_number("offset", "vrnn-da*-logs") + 1
+    # assert attempt is not None
+    
+    # train(data_info,
+    #         train_data_a, train_labels_a, test_data_a, test_labels_a,
+    #         train_data_b, train_labels_b, test_data_b, test_labels_b,
+    #         model_func=build_vrnn,
+    #         embedding_prefix="vrnn_da_"+str(attempt),
+    #         model_dir="offset-models/vrnn-da"+str(attempt)+"-models",
+    #         log_dir="offset/vrnn-da"+str(attempt)+"-logs",
+    #         adaptation=True)
 
     # Train and evaluate VRADA - i.e. VRNN but with adversarial domain adaptation
     """
