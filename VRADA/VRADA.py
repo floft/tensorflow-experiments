@@ -352,12 +352,34 @@ def last_modified_number(dir_name, glob):
     return None
 
 if __name__ == '__main__':
-    # Used when training on Kamiak
     parser = argparse.ArgumentParser()
     parser.add_argument('--modeldir', default="models", type=str,
         help="Directory for saving model files")
     parser.add_argument('--logdir', default="logs", type=str,
         help="Directory for saving log files")
+    parser.add_argument('--imgdir', default="images", type=str,
+        help="Directory for saving image files")
+    parser.add_argument('--lstm', dest='lstm', action='store_true',
+        help="Run LSTM model")
+    parser.add_argument('--no-lstm', dest='lstm', action='store_false',
+        help="Do not run LSTM model (default)")
+    parser.add_argument('--vrnn', dest='vrnn', action='store_true',
+        help="Run VRNN model")
+    parser.add_argument('--no-vrnn', dest='vrnn', action='store_false',
+        help="Do not run VRNN model (default)")
+    parser.add_argument('--lstm-da', dest='lstm_da', action='store_true',
+        help="Run LSTM-DA model")
+    parser.add_argument('--no-lstm-da', dest='lstm_da', action='store_false',
+        help="Do not run LSTM-DA model (default)")
+    parser.add_argument('--vrnn-da', dest='vrnn_da', action='store_true',
+        help="Run VRNN-DA model")
+    parser.add_argument('--no-vrnn-da', dest='vrnn_da', action='store_false',
+        help="Do not run VRNN-DA model (default)")
+    parser.add_argument('--debug', dest='debug', action='store_true',
+        help="Increment model/log/image count each run")
+    parser.add_argument('--no-debug', dest='debug', action='store_false',
+        help="Do not increment model/log/image count each run (default)")
+    parser.set_defaults(lstm=False, vrnn=False, lstm_da=False, vrnn_da=False, debug=False)
     args = parser.parse_args()
 
     # Load datasets - domains A & B
@@ -398,54 +420,43 @@ if __name__ == '__main__':
     train_data_b, train_labels_b = one_hot(train_data_b, train_labels_b, num_classes)
     test_data_b, test_labels_b = one_hot(test_data_b, test_labels_b, num_classes)
 
-    # Train and evaluate LSTM
-    # attempt = last_modified_number("offset", "lstm-*-logs") + 1
-    # attempt = attempt+1 if attempt is not None else 1
-    # print("Attempt:", attempt)
-
-    # train(data_info,
-    #         train_data_a, train_labels_a, test_data_a, test_labels_a,
-    #         train_data_b, train_labels_b, test_data_b, test_labels_b,
-    #         model_func=build_lstm,
-    #         embedding_prefix="images/lstm_da_"+str(attempt),
-    #         model_dir="offset-models/lstm-da"+str(attempt)+"-models",
-    #         log_dir="offset/lstm-da"+str(attempt)+"-logs",
-    #         adaptation=True)
-
-    # train(data_info,
-    #         train_data_a, train_labels_a, test_data_a, test_labels_a,
-    #         train_data_b, train_labels_b, test_data_b, test_labels_b,
-    #         model_func=build_lstm,
-    #         embedding_prefix="images/lstm_"+str(attempt),
-    #         model_dir="offset-models/lstm-"+str(attempt)+"-models",
-    #         log_dir="offset/lstm-"+str(attempt)+"-logs",
-    #         adaptation=False)
+    assert args.lstm + args.vrnn + args.lstm_da + args.vrnn_da == 1, \
+        "Must specify exactly one method to run"
     
-    #tf.reset_default_graph()
+    if args.lstm:
+        prefix = "lstm"
+        adaptation = False
+        model_func = build_lstm
+    elif args.vrnn:
+        prefix = "vrnn"
+        adaptation = False
+        model_func = build_vrnn
+    elif args.lstm_da:
+        prefix = "lstm-da"
+        adaptation = True
+        model_func = build_lstm
+    elif args.vrnn_da:
+        prefix = "vrnn-da"
+        adaptation = True
+        model_func = build_vrnn
     
+    if args.debug:
+        attempt = last_modified_number(args.logdir, prefix+"*")
+        attempt = attempt+1 if attempt is not None else 1
+        print("Attempt:", attempt)
 
-    # Train and evaluate VRNN
-    attempt = last_modified_number("offset", "vrnn-*-logs")
-    attempt = attempt+1 if attempt is not None else 1
-    print("Attempt:", attempt)
-    
+        prefix += "-"+str(attempt)
+        model_dir = os.path.join(args.modeldir, prefix)
+        log_dir = os.path.join(args.logdir, prefix)
+    else:
+        model_dir = args.modeldir
+        log_dir = args.logdir
+
     train(data_info,
             train_data_a, train_labels_a, test_data_a, test_labels_a,
             train_data_b, train_labels_b, test_data_b, test_labels_b,
-            model_func=build_vrnn,
-            embedding_prefix="images/vrnn_da_"+str(attempt),
-            model_dir="offset-models/vrnn-da"+str(attempt)+"-models",
-            log_dir="offset/vrnn-da"+str(attempt)+"-logs",
-            adaptation=True)
-
-    # Train and evaluate VRADA - i.e. VRNN but with adversarial domain adaptation
-    """
-    train(data_info,
-            train_data_a, train_labels_a, test_data_a, test_labels_a,
-            train_data_b, train_labels_b, test_data_b, test_labels_b,
-            model_func=vrada_model,
-            model_dir="plane-test-models/vrada-models",
-            log_dir="plane-test/vrada-logs")
-            #model_dir=args.modeldir,
-            #log_dir=args.logdir)
-    """
+            model_func=model_func,
+            model_dir=model_dir,
+            log_dir=log_dir,
+            embedding_prefix=os.path.join(args.imgdir, prefix),
+            adaptation=adaptation)
