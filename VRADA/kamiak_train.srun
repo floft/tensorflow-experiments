@@ -46,13 +46,20 @@ echo "Getting data: done"
 
 # Install dependencies
 echo "Making sure TensorFlow installed: starting"
-pip install --user tensorflow-gpu pillow lxml jupyter matplotlib pandas sklearn
+pip install --user tensorflow-gpu pillow lxml jupyter matplotlib pandas sklearn scipy
 echo "Making sure TensorFlow installed: done"
 
 # Train
 echo "Training network: started"
 mkdir -p "$data/$logFolder/" # log dir, rsync this to view with TensorBoard
-python3 "$program" --logdir "$data/$logFolder" --modeldir "$data/$modelFolder"
+python3 "$program" --logdir "$data/$logFolder" --modeldir "$data/$modelFolder" \
+    --imgdir "$data/$imgFolder" --lstm --debug
+python3 "$program" --logdir "$data/$logFolder" --modeldir "$data/$modelFolder" \
+    --imgdir "$data/$imgFolder" --vrnn --debug
+python3 "$program" --logdir "$data/$logFolder" --modeldir "$data/$modelFolder" \
+    --imgdir "$data/$imgFolder" --lstm-da --debug
+python3 "$program" --logdir "$data/$logFolder" --modeldir "$data/$modelFolder" \
+    --imgdir "$data/$imgFolder" --vrnn-da --debug
 echo "Training network: done"
 
 # Cleanup

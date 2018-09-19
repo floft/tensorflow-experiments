@@ -5,6 +5,7 @@ dir="/data/vcea/matt.taylor/Projects/ras-object-detection/vrada"
 program="VRADA.py"
 modelFolder="vrada-models"
 logFolder="vrada-logs"
+imgFolder="vrada-images"
 compressedDataset="dataset.zip"
 dataset=("trivial")
 

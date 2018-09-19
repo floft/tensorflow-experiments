@@ -9,4 +9,5 @@ to="$localdir"
 rsync -Pahuv \
     --include="$logFolder/" --include="$logFolder/*" \
     --include="$modelFolder/" --include="$modelFolder/*" \
+    --include="$imgFolder/" --include="$imgFolder/*" \
     --exclude="*" "$from" "$to"

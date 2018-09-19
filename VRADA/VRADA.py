@@ -36,21 +36,24 @@ def train(data_info,
         features_b, labels_b, test_features_b, test_labels_b,
         model_func=build_lstm,
         batch_size=128,
-        num_steps=1000,
+        num_steps=100000,
         learning_rate=0.0003,
         dropout_keep_prob=0.8,
         model_dir="models",
         log_dir="logs",
+        img_dir="images",
         embedding_prefix=None,
-        model_save_steps=200,
-        log_save_steps=5,
-        log_extra_save_steps=25,
+        model_save_steps=1000,
+        log_save_steps=50,
+        log_extra_save_steps=250,
         adaptation=True):
 
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
+    if not os.path.exists(img_dir):
+        os.makedirs(img_dir)
 
     # Data stats
     time_steps, num_features, num_classes = data_info
@@ -310,9 +313,9 @@ def train(data_info,
             pca = PCA(n_components=2).fit_transform(embedding)
 
             plot_embedding(tsne, combined_labels.argmax(1), combined_domain.argmax(1),
-                title='Domain Adaptation', filename=embedding_prefix+"_tsne.png")
+                title='Domain Adaptation', filename=os.path.join(img_dir, embedding_prefix+"_tsne.png"))
             plot_embedding(pca, combined_labels.argmax(1), combined_domain.argmax(1),
-                title='Domain Adaptation', filename=embedding_prefix+"_pca.png")
+                title='Domain Adaptation', filename=os.path.join(img_dir, embedding_prefix+"_pca.png"))
         
             # Output time-series "reconstructions" from our generator (if VRNN)
             if extra_model_outputs is not None:
@@ -323,14 +326,14 @@ def train(data_info,
                 })
 
                 plot_random_time_series(mu, sigma, title='VRNN Samples (source domain)',
-                    filename=embedding_prefix+"_reconstruction_a.png")
+                    filename=os.path.join(img_dir, embedding_prefix+"_reconstruction_a.png"))
 
                 mu, sigma = sess.run(extra_model_outputs, feed_dict={
                     x: eval_data_b, keep_prob: 1.0, training: False
                 })
 
                 plot_random_time_series(mu, sigma, title='VRNN Samples (target domain)',
-                    filename=embedding_prefix+"_reconstruction_b.png")
+                    filename=os.path.join(img_dir, embedding_prefix+"_reconstruction_b.png"))
 
 def last_modified_number(dir_name, glob):
     """
@@ -458,5 +461,6 @@ if __name__ == '__main__':
             model_func=model_func,
             model_dir=model_dir,
             log_dir=log_dir,
-            embedding_prefix=os.path.join(args.imgdir, prefix),
+            img_dir=args.imgdir,
+            embedding_prefix=prefix,
             adaptation=adaptation)
