@@ -210,27 +210,23 @@ def train(data_info,
                 combined_labels = np.concatenate((labels_batch_a, np.zeros(labels_batch_b.shape)), axis=0)
                 combined_domain = np.concatenate((source_domain, target_domain), axis=0)
 
-                feed_dict = {
+                # Train everything in one step which should give a similar result
+                sess.run(train_all, feed_dict={
                     x: combined_x, y: combined_labels, domain: combined_domain,
                     grl_lambda: grl_lambda_value,
                     keep_prob: dropout_keep_prob, lr: lr_value, training: True
-                }
+                })
 
-                # In the paper they split optimization into two parts
-                #sess.run(train_notdomain, feed_dict=feed_dict)
-                #sess.run(train_domain, feed_dict=feed_dict)
-
-                # Or, train everything in one step which should give a similar result
-                sess.run(train_all, feed_dict=feed_dict)
-
-                # Update domain more
-                feed_dict = {
+                # Update domain more -- makes a big difference
+                #
+                # Note: this is probably more-or-less using a two time-scale learning rate (TTUR)
+                # from the methods to help GANs converge. Appears to help in adversarial domain
+                # adaptation as well.
+                sess.run(train_domain, feed_dict={
                     x: combined_x, y: combined_labels, domain: combined_domain,
                     grl_lambda: 0.0,
                     keep_prob: dropout_keep_prob, lr: 100*lr_value, training: True
-                }
-
-                sess.run(train_domain, feed_dict=feed_dict)
+                })
             else:
                 # Train task classifier on source domain to be correct
                 sess.run(train_notdomain, feed_dict={
