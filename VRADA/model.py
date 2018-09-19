@@ -177,8 +177,8 @@ def build_lstm(x, y, domain, grl_lambda, keep_prob, training,
     # Build LSTM
     with tf.variable_scope("rnn_model"):
         _, outputs, _, _ = build_rnn(x, keep_prob, [
-            tf.contrib.rnn.BasicLSTMCell(50),
-            #tf.contrib.rnn.LayerNormBasicLSTMCell(50, dropout_keep_prob=keep_prob),
+            tf.contrib.rnn.BasicLSTMCell(100),
+            #tf.contrib.rnn.LayerNormBasicLSTMCell(100, dropout_keep_prob=keep_prob),
         ])
 
         rnn_output = outputs[:, -1]

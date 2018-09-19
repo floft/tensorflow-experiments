@@ -222,6 +222,15 @@ def train(data_info,
 
                 # Or, train everything in one step which should give a similar result
                 sess.run(train_all, feed_dict=feed_dict)
+
+                # Update domain more
+                feed_dict = {
+                    x: combined_x, y: combined_labels, domain: combined_domain,
+                    grl_lambda: 0.0,
+                    keep_prob: dropout_keep_prob, lr: 100*lr_value, training: True
+                }
+
+                sess.run(train_domain, feed_dict=feed_dict)
             else:
                 # Train task classifier on source domain to be correct
                 sess.run(train_notdomain, feed_dict={
@@ -394,18 +403,18 @@ if __name__ == '__main__':
     test_data_b, test_labels_b = one_hot(test_data_b, test_labels_b, num_classes)
 
     # Train and evaluate LSTM
-    attempt = last_modified_number("offset", "lstm-*-logs") + 1
-    assert attempt is not None
-    print("Attempt:", attempt)
+    # attempt = last_modified_number("offset", "lstm-*-logs") + 1
+    # attempt = attempt+1 if attempt is not None else 1
+    # print("Attempt:", attempt)
 
-    train(data_info,
-            train_data_a, train_labels_a, test_data_a, test_labels_a,
-            train_data_b, train_labels_b, test_data_b, test_labels_b,
-            model_func=build_lstm,
-            embedding_prefix="images/lstm_da_"+str(attempt),
-            model_dir="offset-models/lstm-da"+str(attempt)+"-models",
-            log_dir="offset/lstm-da"+str(attempt)+"-logs",
-            adaptation=True)
+    # train(data_info,
+    #         train_data_a, train_labels_a, test_data_a, test_labels_a,
+    #         train_data_b, train_labels_b, test_data_b, test_labels_b,
+    #         model_func=build_lstm,
+    #         embedding_prefix="images/lstm_da_"+str(attempt),
+    #         model_dir="offset-models/lstm-da"+str(attempt)+"-models",
+    #         log_dir="offset/lstm-da"+str(attempt)+"-logs",
+    #         adaptation=True)
 
     # train(data_info,
     #         train_data_a, train_labels_a, test_data_a, test_labels_a,
@@ -420,17 +429,18 @@ if __name__ == '__main__':
     
 
     # Train and evaluate VRNN
-    # attempt = last_modified_number("offset", "vrnn-da*-logs") + 1
-    # assert attempt is not None
+    attempt = last_modified_number("offset", "vrnn-*-logs")
+    attempt = attempt+1 if attempt is not None else 1
+    print("Attempt:", attempt)
     
-    # train(data_info,
-    #         train_data_a, train_labels_a, test_data_a, test_labels_a,
-    #         train_data_b, train_labels_b, test_data_b, test_labels_b,
-    #         model_func=build_vrnn,
-    #         embedding_prefix="images/vrnn_da_"+str(attempt),
-    #         model_dir="offset-models/vrnn-da"+str(attempt)+"-models",
-    #         log_dir="offset/vrnn-da"+str(attempt)+"-logs",
-    #         adaptation=True)
+    train(data_info,
+            train_data_a, train_labels_a, test_data_a, test_labels_a,
+            train_data_b, train_labels_b, test_data_b, test_labels_b,
+            model_func=build_vrnn,
+            embedding_prefix="images/vrnn_da_"+str(attempt),
+            model_dir="offset-models/vrnn-da"+str(attempt)+"-models",
+            log_dir="offset/vrnn-da"+str(attempt)+"-logs",
+            adaptation=True)
 
     # Train and evaluate VRADA - i.e. VRNN but with adversarial domain adaptation
     """
