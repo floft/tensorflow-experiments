@@ -79,12 +79,12 @@ def train(data_info,
         next_data_batch_test_b, next_labels_batch_test_b = eval_input_fn_b()
 
     # Inputs
-    keep_prob = tf.placeholder_with_default(1.0, shape=()) # for dropout
+    keep_prob = tf.placeholder_with_default(1.0, shape=(), name='keep_prob') # for dropout
     x = tf.placeholder(tf.float32, [None, time_steps, num_features], name='x') # input data
     domain = tf.placeholder(tf.float32, [None, 2], name='domain') # which domain
     y = tf.placeholder(tf.float32, [None, num_classes], name='y') # class 1, 2, etc. one-hot
     training = tf.placeholder(tf.bool, name='training') # whether we're training (batch norm)
-    grl_lambda = tf.placeholder_with_default(1.0, shape=()) # gradient multiplier for gradient reversal layer
+    grl_lambda = tf.placeholder_with_default(1.0, shape=(), name='grl_lambda') # gradient multiplier for GRL
     lr = tf.placeholder(tf.float32, (), name='learning_rate')
 
     # Source domain will be [[1,0], [1,0], ...] and target domain [[0,1], [0,1], ...]
@@ -114,23 +114,32 @@ def train(data_info,
             tf.equal(tf.argmax(domain, axis=-1), tf.argmax(domain_classifier, axis=-1)),
         tf.float32))
     
-    # Get variables of model
+    # Get variables of model - needed if we train in two steps
     variables = tf.trainable_variables()
     rnn_vars = [v for v in variables if 'rnn_model' in v.name]
     feature_extractor_vars = [v for v in variables if 'feature_extractor' in v.name]
     task_classifier_vars = [v for v in variables if 'task_classifier' in v.name]
     domain_classifier_vars = [v for v in variables if 'domain_classifier' in v.name]
 
-    # Optimizer - update ops for batch norm (not sure batch norm is working though...)
-    #with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS, "rnn_model")):
-    optimizer = tf.train.AdamOptimizer(lr)
-    train_all = optimizer.minimize(total_loss)
-    train_notdomain = optimizer.minimize(total_loss,
-        var_list=rnn_vars+feature_extractor_vars+task_classifier_vars)
+    # Optimizer - update ops for batch norm layers
+    with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS)):
+        optimizer = tf.train.AdamOptimizer(lr)
+        train_all = optimizer.minimize(total_loss)
+        train_notdomain = optimizer.minimize(total_loss,
+            var_list=rnn_vars+feature_extractor_vars+task_classifier_vars)
 
-    if adaptation:
-        train_domain = optimizer.minimize(total_loss,
-            var_list=domain_classifier_vars)
+        if adaptation:
+            train_domain = optimizer.minimize(total_loss,
+                var_list=domain_classifier_vars)
+
+    # For making sure batch norm is working -- moving averages
+    # global_variables = tf.global_variables()
+    # moving_batch_vars = [v for v in global_variables if 'moving_' in v.name]
+
+    # for v in moving_batch_vars:
+    #     model_summaries.append(
+    #         tf.summary.histogram(v.name.replace(":0",""), v)
+    #     )
 
     # Summaries - training and evaluation for both domains A and B
     training_summaries_a = tf.summary.merge([
@@ -387,6 +396,7 @@ if __name__ == '__main__':
     # Train and evaluate LSTM
     attempt = last_modified_number("offset", "lstm-*-logs") + 1
     assert attempt is not None
+    print("Attempt:", attempt)
 
     train(data_info,
             train_data_a, train_labels_a, test_data_a, test_labels_a,

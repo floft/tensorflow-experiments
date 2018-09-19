@@ -29,7 +29,7 @@ def build_rnn(x, keep_prob, layers):
 
     return initial_state, outputs, cell, final_state
 
-def classifier(x, num_classes, keep_prob=None):
+def classifier(x, num_classes, keep_prob, training, batch_norm):
     """
     We'll use the same clasifier for task or domain classification
 
@@ -39,33 +39,35 @@ def classifier(x, num_classes, keep_prob=None):
     and after for use in prediction. See softmax_cross_entropy_with_logits_v2
     documentation: "This op expects unscaled logits, ..."
     """
-    with tf.variable_scope("classifier"):
-        classifier_output = tf.contrib.layers.fully_connected(
-                x, 50, activation_fn=tf.nn.relu)
-        if keep_prob is not None:
+    classifier_output = x
+    num_layers = 4
+
+    for i in range(num_layers):
+        with tf.variable_scope("layer_"+str(i)):
+            # Last layer has desired output size, otherwise use a fixed size
+            if i == num_layers-1:
+                num_features = num_classes
+            else:
+                num_features = 50
+
+            classifier_output = tf.contrib.layers.fully_connected(
+                    classifier_output, num_features, activation_fn=None)
             classifier_output = tf.nn.dropout(classifier_output, keep_prob)
 
-        classifier_output = tf.contrib.layers.fully_connected(
-                classifier_output, 50, activation_fn=tf.nn.relu)
-        if keep_prob is not None:
-            classifier_output = tf.nn.dropout(classifier_output, keep_prob)
+            if batch_norm:
+                classifier_output = tf.layers.batch_normalization(
+                    classifier_output, training=training)
 
-        classifier_output = tf.contrib.layers.fully_connected(
-                classifier_output, 50, activation_fn=tf.nn.relu)
-        if keep_prob is not None:
-            classifier_output = tf.nn.dropout(classifier_output, keep_prob)
-
-        classifier_output = tf.contrib.layers.fully_connected(
-                classifier_output, num_classes, activation_fn=None)
-        if keep_prob is not None:
-            classifier_output = tf.nn.dropout(classifier_output, keep_prob)
-        
-        softmax_output = tf.nn.softmax(classifier_output)
+            # Last activation is softmax, which we will apply afterwards
+            if i != num_layers-1:
+                classifier_output = tf.nn.relu(classifier_output)
+    
+    softmax_output = tf.nn.softmax(classifier_output)
     
     return classifier_output, softmax_output
 
 def build_model(x, y, domain, grl_lambda, keep_prob, training,
-        num_classes, adaptation=True, two_domain_classifiers=False):
+        num_classes, adaptation=True, batch_norm=False, two_domain_classifiers=False):
     """
     Creates the feature extractor, task classifier, domain classifier
 
@@ -85,31 +87,39 @@ def build_model(x, y, domain, grl_lambda, keep_prob, training,
     """
 
     with tf.variable_scope("feature_extractor"):
-        # We'll only use the output at the last time step for classification
         feature_extractor = x
-        #feature_extractor = tf.reshape(x, [tf.shape(x)[0], 25]) # alternatively, bypass RNN and just use dense
-        feature_extractor = tf.contrib.layers.fully_connected(feature_extractor, 100)
-        feature_extractor = tf.nn.dropout(feature_extractor, keep_prob)
-        feature_extractor = tf.contrib.layers.fully_connected(feature_extractor, 100)
-        feature_extractor = tf.nn.dropout(feature_extractor, keep_prob)
-        feature_extractor = tf.contrib.layers.fully_connected(feature_extractor, 100)
-        feature_extractor = tf.nn.dropout(feature_extractor, keep_prob)
+        num_layers = 3
+
+        for i in range(num_layers):
+            with tf.variable_scope("layer_"+str(i)):
+                feature_extractor = tf.contrib.layers.fully_connected(
+                    feature_extractor, 100, activation_fn=None)
+                feature_extractor = tf.nn.dropout(feature_extractor, keep_prob)
+
+                if batch_norm:
+                    feature_extractor = tf.layers.batch_normalization(
+                        feature_extractor, training=training)
+                
+                feature_extractor = tf.nn.relu(feature_extractor)
 
     # Pass last output to fully connected then softmax to get class prediction
     with tf.variable_scope("task_classifier"):
-        task_classifier, task_softmax = classifier(feature_extractor, num_classes, keep_prob)
+        task_classifier, task_softmax = classifier(
+            feature_extractor, num_classes, keep_prob, training, batch_norm)
 
     # Also pass output to domain classifier
     # Note: always have 2 domains, so set outputs to 2
     with tf.variable_scope("domain_classifier"):
         gradient_reversal_layer = flip_gradient(feature_extractor, grl_lambda)
-        domain_classifier, domain_softmax = classifier(gradient_reversal_layer, 2, keep_prob)
+        domain_classifier, domain_softmax = classifier(
+            gradient_reversal_layer, 2, keep_prob, training, batch_norm)
 
     # Maybe try one before the feature extractor too
     if two_domain_classifiers:
         with tf.variable_scope("domain_classifier2"):
             gradient_reversal_layer2 = flip_gradient(x, grl_lambda)
-            domain_classifier2, domain_softmax2 = classifier(gradient_reversal_layer2, 2, keep_prob)
+            domain_classifier2, _ = classifier(
+                gradient_reversal_layer2, 2, keep_prob, training, batch_norm)
 
     # If doing domain adaptation, then we'll need to ignore the second half of the
     # batch for task classification during training since we don't know the labels
@@ -168,6 +178,7 @@ def build_lstm(x, y, domain, grl_lambda, keep_prob, training,
     with tf.variable_scope("rnn_model"):
         _, outputs, _, _ = build_rnn(x, keep_prob, [
             tf.contrib.rnn.BasicLSTMCell(50),
+            #tf.contrib.rnn.LayerNormBasicLSTMCell(50, dropout_keep_prob=keep_prob),
         ])
 
         rnn_output = outputs[:, -1]
