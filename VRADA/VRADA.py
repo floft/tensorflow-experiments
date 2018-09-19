@@ -392,7 +392,7 @@ if __name__ == '__main__':
             train_data_a, train_labels_a, test_data_a, test_labels_a,
             train_data_b, train_labels_b, test_data_b, test_labels_b,
             model_func=build_lstm,
-            embedding_prefix="lstm_da_"+str(attempt),
+            embedding_prefix="images/lstm_da_"+str(attempt),
             model_dir="offset-models/lstm-da"+str(attempt)+"-models",
             log_dir="offset/lstm-da"+str(attempt)+"-logs",
             adaptation=True)
@@ -401,7 +401,7 @@ if __name__ == '__main__':
     #         train_data_a, train_labels_a, test_data_a, test_labels_a,
     #         train_data_b, train_labels_b, test_data_b, test_labels_b,
     #         model_func=build_lstm,
-    #         embedding_prefix="lstm_"+str(attempt),
+    #         embedding_prefix="images/lstm_"+str(attempt),
     #         model_dir="offset-models/lstm-"+str(attempt)+"-models",
     #         log_dir="offset/lstm-"+str(attempt)+"-logs",
     #         adaptation=False)
@@ -417,7 +417,7 @@ if __name__ == '__main__':
     #         train_data_a, train_labels_a, test_data_a, test_labels_a,
     #         train_data_b, train_labels_b, test_data_b, test_labels_b,
     #         model_func=build_vrnn,
-    #         embedding_prefix="vrnn_da_"+str(attempt),
+    #         embedding_prefix="images/vrnn_da_"+str(attempt),
     #         model_dir="offset-models/vrnn-da"+str(attempt)+"-models",
     #         log_dir="offset/vrnn-da"+str(attempt)+"-logs",
     #         adaptation=True)
