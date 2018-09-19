@@ -166,10 +166,8 @@ def build_lstm(x, y, domain, grl_lambda, keep_prob, training,
     """ LSTM for a baseline """
     # Build LSTM
     with tf.variable_scope("rnn_model"):
-        initial_state, outputs, cell, final_state = build_rnn(x, keep_prob, [
+        _, outputs, _, _ = build_rnn(x, keep_prob, [
             tf.contrib.rnn.BasicLSTMCell(50),
-            #tf.contrib.rnn.LSTMCell(100),
-            #tf.contrib.rnn.LSTMCell(100, use_peepholes=True),
         ])
 
         rnn_output = outputs[:, -1]
@@ -196,7 +194,7 @@ def build_lstm(x, y, domain, grl_lambda, keep_prob, training,
     # We can't generate with an LSTM
     extra_outputs = None
 
-    return task_softmax, domain_softmax, total_loss, domain_loss, \
+    return task_softmax, domain_softmax, total_loss, \
         feature_extractor, summaries, extra_outputs
 
 def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
@@ -204,7 +202,7 @@ def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
     """ VRNN model """
     # Build VRNN
     with tf.variable_scope("rnn_model"):
-        initial_state, outputs, cell, final_state = build_rnn(x, keep_prob, [
+        _, outputs, _, _ = build_rnn(x, keep_prob, [
             VRNNCell(num_features, 100, 100, training, batch_norm=False),
         ])
         # Note: if you try using more than one layer above, then you need to
@@ -288,5 +286,5 @@ def build_vrnn(x, y, domain, grl_lambda, keep_prob, training,
         decoder_mu, decoder_sigma,
     ]
 
-    return task_softmax, domain_softmax, total_loss, domain_loss, \
+    return task_softmax, domain_softmax, total_loss, \
         feature_extractor, summaries, extra_outputs

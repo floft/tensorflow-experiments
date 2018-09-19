@@ -99,7 +99,7 @@ def train(data_info,
     # Model, loss, feature extractor output -- e.g. using build_lstm or build_vrnn
     #
     # Optionally also returns additional summaries to log, e.g. loss components
-    task_classifier, domain_classifier, total_loss, domain_loss, \
+    task_classifier, domain_classifier, total_loss, \
     feature_extractor, model_summaries, extra_model_outputs = \
         model_func(x, y, domain, grl_lambda, keep_prob, training,
             num_classes, num_features, adaptation)

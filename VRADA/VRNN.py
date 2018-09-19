@@ -180,8 +180,7 @@ class VRNNCell(tf.contrib.rnn.LayerRNNCell):
         # into the same next state vector. We'll combine them together to pass in and split them
         # back out after the LSTM returns the next state.
         rnn_cell_input = tf.concat((x_1, z_1), 1)
-        output, (c_next, h_next) = self.cell(rnn_cell_input, [c, h]) # Note: (h,c) in Keras (c,h) in contrib
-        #output, (h_next, c_next) = self.cell(rnn_cell_input, [h, c]) # Note: (h,c) in Keras (c,h) in contrib
+        _, (c_next, h_next) = self.cell(rnn_cell_input, [c, h]) # Note: (h,c) in Keras (c,h) in contrib
 
         # VRNN state
         next_state = (

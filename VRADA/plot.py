@@ -26,7 +26,7 @@ def plot_embedding(x, y, d, title=None, filename=None):
 
     # Plot colors numbers
     plt.figure(figsize=(10,10))
-    ax = plt.subplot(111)
+    plt.subplot(111)
     for i in range(x.shape[0]):
         # plot colored number
         plt.text(x[i, 0], x[i, 1], domain[d[i]]+str(y[i]),
