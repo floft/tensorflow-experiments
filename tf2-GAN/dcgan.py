@@ -24,12 +24,9 @@ def load_mnist(buffer_size=60000, batch_size=256, prefetch_buffer_size=1):
     # Normalize the images to [-1, 1]
     train_images = (train_images - 127.5) / 127.5
     # Shuffle and batch
-    train_dataset = tf.data.Dataset.from_tensor_slices(train_images).\
+    return tf.data.Dataset.from_tensor_slices(train_images).\
         shuffle(buffer_size).batch(batch_size).prefetch(prefetch_buffer_size)
 
-    return train_dataset
-
-# TODO implement these in tf.keras.Sequential([ ... ]) instead
 def make_generator_model():
     model = tf.keras.Sequential()
     model.add(layers.Dense(7*7*256, use_bias=False, input_shape=(100,)))
@@ -55,20 +52,18 @@ def make_generator_model():
     return model
 
 def make_discriminator_model():
-    model = tf.keras.Sequential()
-    model.add(layers.Conv2D(64, (5, 5), strides=(2, 2), padding='same',
-                                     input_shape=[28, 28, 1]))
-    model.add(layers.LeakyReLU())
-    model.add(layers.Dropout(0.3))
+    return tf.keras.Sequential([
+        layers.Conv2D(64, (5, 5), strides=(2, 2), padding='same', input_shape=[28, 28, 1]),
+        layers.LeakyReLU(),
+        layers.Dropout(0.3),
 
-    model.add(layers.Conv2D(128, (5, 5), strides=(2, 2), padding='same'))
-    model.add(layers.LeakyReLU())
-    model.add(layers.Dropout(0.3))
+        layers.Conv2D(128, (5, 5), strides=(2, 2), padding='same'),
+        layers.LeakyReLU(),
+        layers.Dropout(0.3),
 
-    model.add(layers.Flatten())
-    model.add(layers.Dense(1))
-
-    return model
+        layers.Flatten(),
+        layers.Dense(1),
+    ])
 
 def make_losses():
     cross_entropy = tf.keras.losses.BinaryCrossentropy(from_logits=True)
@@ -84,8 +79,6 @@ def make_losses():
 
     return discriminator_loss, generator_loss
 
-# TODO use two separate networks sharing weights and use train_on_batch?
-# and test_on_batch?
 @tf.function
 def train_step(images, generator, discriminator, generator_loss,
         discriminator_loss, generator_optimizer, discriminator_optimizer,
@@ -119,7 +112,6 @@ def train(dataset, generator, discriminator, generator_loss, discriminator_loss,
                 discriminator_loss, generator_optimizer,
                 discriminator_optimizer, noise_dim)
 
-        # Produce images for the GIF as we go
         display.clear_output(wait=True)
         generate_and_save_images(generator, epoch+1, seed)
 
@@ -128,10 +120,6 @@ def train(dataset, generator, discriminator, generator_loss, discriminator_loss,
             checkpoint_manager.save(checkpoint_number=epoch+1)
 
         print('Time for epoch {} is {} sec'.format(epoch+1, time.time()-start))
-
-    # Generate after the final epoch
-    display.clear_output(wait=True)
-    generate_and_save_images(generator, epochs, seed)
 
 def generate_and_save_images(model, epoch, test_input):
     predictions = model(test_input, training=False)
