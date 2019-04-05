@@ -5,8 +5,6 @@ GAN in TensorFlow 2.0
 Based on:
 https://colab.research.google.com/github/tensorflow/docs/blob/master/site/en/r2/tutorials/generative/dcgan.ipynb
 https://github.com/tensorflow/tensorflow/blob/master/tensorflow/contrib/eager/python/examples/generative_examples/dcgan.ipynb
-https://towardsdatascience.com/gan-by-example-using-keras-on-tensorflow-backend-1a6d515a60d0
-https://pgaleone.eu/tensorflow/gan/2018/11/04/tensorflow-2-models-migration-and-new-design/
 """
 import time
 import numpy as np
@@ -27,9 +25,9 @@ def load_mnist(buffer_size=60000, batch_size=256, prefetch_buffer_size=1):
     return tf.data.Dataset.from_tensor_slices(train_images).\
         shuffle(buffer_size).batch(batch_size).prefetch(prefetch_buffer_size)
 
-def make_generator_model():
+def make_generator_model(noise_dim):
     model = tf.keras.Sequential()
-    model.add(layers.Dense(7*7*256, use_bias=False, input_shape=(100,)))
+    model.add(layers.Dense(7*7*256, use_bias=False, input_shape=(noise_dim,)))
     model.add(layers.BatchNormalization())
     model.add(layers.LeakyReLU())
 
@@ -115,7 +113,6 @@ def train(dataset, generator, discriminator, generator_loss, discriminator_loss,
         display.clear_output(wait=True)
         generate_and_save_images(generator, epoch+1, seed)
 
-        # Save the model every 5 epochs
         if (epoch+1)%5 == 0:
             checkpoint_manager.save(checkpoint_number=epoch+1)
 
@@ -137,11 +134,17 @@ def generate_and_save_images(model, epoch, test_input):
     fig.canvas.flush_events()
 
 if __name__ == "__main__":
+    # Parameters
+    epochs = 50
+    noise_dim = 100
+    num_examples_to_generate = 16
+    seed = tf.random.normal([num_examples_to_generate, noise_dim])
+
     # Load training data
     train_dataset = load_mnist()
 
     # Create models, losses, optimizers
-    generator = make_generator_model()
+    generator = make_generator_model(noise_dim)
     discriminator = make_discriminator_model()
     discriminator_loss, generator_loss = make_losses()
     generator_optimizer = tf.keras.optimizers.Adam(1e-4)
@@ -153,15 +156,10 @@ if __name__ == "__main__":
         discriminator_optimizer=discriminator_optimizer,
         generator=generator, discriminator=discriminator)
     checkpoint_manager = tf.train.CheckpointManager(checkpoint,
-        directory="./training_checkpoints", max_to_keep=5)
+        directory="./training_checkpoints", max_to_keep=1)
     #checkpoint.restore(checkpoint_manager.latest_checkpoint)
 
     # Train
-    epochs = 150
-    noise_dim = 100
-    num_examples_to_generate = 16
-    seed = tf.random.normal([num_examples_to_generate, noise_dim])
-
     train(train_dataset, generator, discriminator, generator_loss,
         discriminator_loss, generator_optimizer, discriminator_optimizer,
         noise_dim, seed, epochs, checkpoint_manager)
