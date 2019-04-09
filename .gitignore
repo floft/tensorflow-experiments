@@ -12,5 +12,6 @@ __pycache__/
 *.npy
 *.png
 *.gif
+*.mp4
 ckpt-*
 checkpoint
