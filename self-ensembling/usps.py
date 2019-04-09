@@ -50,9 +50,11 @@ def load_usps_file(filename):
 
     return images, labels
 
-def process_usps(data):
+def process_usps(data, labels):
     """ Reshape (already normalized to [-1,1], should already be float) """
-    return data.reshape(data.shape[0], 16, 16, 1).astype("float32")
+    data = data.reshape(data.shape[0], 16, 16, 1).astype("float32")
+    labels = labels.astype("float32")
+    return data, labels
 
 def load_usps():
     """
@@ -63,8 +65,8 @@ def load_usps():
     train_fp, test_fp = download_usps()
     train_images, train_labels = load_usps_file(train_fp)
     test_images, test_labels = load_usps_file(test_fp)
-    train_images = process_usps(train_images)
-    test_images = process_usps(test_images)
+    train_images, train_labels = process_usps(train_images, train_labels)
+    test_images, test_labels = process_usps(test_images, test_labels)
     return train_images, train_labels, test_images, test_labels
 
 if __name__ == "__main__":

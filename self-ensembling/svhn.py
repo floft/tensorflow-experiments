@@ -18,11 +18,12 @@ def download_svhn():
         "http://ufldl.stanford.edu/housenumbers/")
     return train_fp, test_fp
 
-def process_svhn(data):
+def process_svhn(data, labels):
     """ Reshape, convert to float, normalize to [-1,1] """
-    data = data.reshape(data.shape[0], 28, 28, 1).astype("float32")
+    data = data.reshape(data.shape[0], 32, 32, 3).astype("float32")
     data = (data - 127.5) / 127.5
-    return data
+    labels = labels.astype("float32")
+    return data, labels
 
 def load_svhn_file(filename):
     """ Load from .mat file """
@@ -40,8 +41,8 @@ def load_svhn():
     train_fp, test_fp = download_svhn()
     train_images, train_labels = load_svhn_file(train_fp)
     test_images, test_labels = load_svhn_file(test_fp)
-    train_images = process_svhn(train_images)
-    test_images = process_svhn(test_images)
+    train_images, train_labels = process_svhn(train_images, train_labels)
+    test_images, test_labels = process_svhn(test_images, test_labels)
     return train_images, train_labels, test_images, test_labels
 
 if __name__ == "__main__":
