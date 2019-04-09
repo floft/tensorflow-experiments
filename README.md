@@ -19,3 +19,4 @@ TensorFlow 1.x
 TensorFlow 2.x
  - tf2-hello-world
  - tf2-GAN
+ - self-ensembling
