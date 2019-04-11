@@ -7,9 +7,9 @@ Usage:
 """
 import gzip
 import numpy as np
-import tensorflow as tf
 
 from load_data import dataset_download
+
 
 def download_usps():
     """ Download the USPS files from online """
@@ -17,6 +17,7 @@ def download_usps():
         ["zip.train.gz", "zip.test.gz", "zip.info.txt"],
         "https://web.stanford.edu/~hastie/ElemStatLearn/datasets/")
     return train_fp, test_fp
+
 
 def floats_to_list(line):
     """ Return list of floating-point numbers from space-separated string """
@@ -31,6 +32,7 @@ def floats_to_list(line):
         floats.append(f)
 
     return floats
+
 
 def load_usps_file(filename):
     """ See zip.info.txt for the file format, which is gzipped """
@@ -50,11 +52,13 @@ def load_usps_file(filename):
 
     return images, labels
 
+
 def process_usps(data, labels):
     """ Reshape (already normalized to [-1,1], should already be float) """
     data = data.reshape(data.shape[0], 16, 16, 1).astype("float32")
     labels = labels.astype("float32")
     return data, labels
+
 
 def load_usps():
     """
@@ -68,6 +72,7 @@ def load_usps():
     train_images, train_labels = process_usps(train_images, train_labels)
     test_images, test_labels = process_usps(test_images, test_labels)
     return train_images, train_labels, test_images, test_labels
+
 
 if __name__ == "__main__":
     train_images, train_labels, test_images, test_labels = load_usps()

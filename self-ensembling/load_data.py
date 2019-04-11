@@ -3,6 +3,7 @@ Data loading functions
 """
 import tensorflow as tf
 
+
 def dataset_download(files_to_download, url, train_index=0, test_index=1):
     """
     Download url/file for file in files_to_download
@@ -16,11 +17,13 @@ def dataset_download(files_to_download, url, train_index=0, test_index=1):
     test_fp = downloaded_files[test_index]
     return train_fp, test_fp
 
+
 def tf_dataset(data, labels, buffer_size=60000, batch_size=256,
         prefetch_buffer_size=1, eval_shuffle_seed=0):
     return tf.data.Dataset.from_tensor_slices((data, labels)).\
         shuffle(buffer_size, seed=eval_shuffle_seed).batch(batch_size).\
         prefetch(prefetch_buffer_size)
+
 
 def load_dataset(train_images, train_labels, test_images, test_labels):
     """

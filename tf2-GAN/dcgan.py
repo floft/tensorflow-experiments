@@ -7,12 +7,12 @@ https://colab.research.google.com/github/tensorflow/docs/blob/master/site/en/r2/
 https://github.com/tensorflow/tensorflow/blob/master/tensorflow/contrib/eager/python/examples/generative_examples/dcgan.ipynb
 """
 import time
-import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 
 from IPython import display
 from tensorflow.keras import layers
+
 
 def load_mnist(buffer_size=60000, batch_size=256, prefetch_buffer_size=1):
     # Load
@@ -25,6 +25,7 @@ def load_mnist(buffer_size=60000, batch_size=256, prefetch_buffer_size=1):
     return tf.data.Dataset.from_tensor_slices(train_images).\
         shuffle(buffer_size).batch(batch_size).prefetch(prefetch_buffer_size)
 
+
 def make_generator_model(noise_dim):
     model = tf.keras.Sequential()
     model.add(layers.Dense(7*7*256, use_bias=False, input_shape=(noise_dim,)))
@@ -32,7 +33,7 @@ def make_generator_model(noise_dim):
     model.add(layers.LeakyReLU())
 
     model.add(layers.Reshape((7, 7, 256)))
-    assert model.output_shape == (None, 7, 7, 256) # Note: None is the batch size
+    assert model.output_shape == (None, 7, 7, 256)  # Note: None is the batch size
 
     model.add(layers.Conv2DTranspose(128, (5, 5), strides=(1, 1), padding='same', use_bias=False))
     assert model.output_shape == (None, 7, 7, 128)
@@ -49,6 +50,7 @@ def make_generator_model(noise_dim):
 
     return model
 
+
 def make_discriminator_model():
     return tf.keras.Sequential([
         layers.Conv2D(64, (5, 5), strides=(2, 2), padding='same', input_shape=[28, 28, 1]),
@@ -63,6 +65,7 @@ def make_discriminator_model():
         layers.Dense(1),
     ])
 
+
 def make_losses():
     cross_entropy = tf.keras.losses.BinaryCrossentropy(from_logits=True)
 
@@ -76,6 +79,7 @@ def make_losses():
         return cross_entropy(tf.ones_like(fake_output), fake_output)
 
     return discriminator_loss, generator_loss
+
 
 @tf.function
 def train_step(images, generator, discriminator, generator_loss,
@@ -99,6 +103,7 @@ def train_step(images, generator, discriminator, generator_loss,
     generator_optimizer.apply_gradients(zip(gradients_of_generator, generator.trainable_variables))
     discriminator_optimizer.apply_gradients(zip(gradients_of_discriminator, discriminator.trainable_variables))
 
+
 def train(dataset, generator, discriminator, generator_loss, discriminator_loss,
         generator_optimizer, discriminator_optimizer, noise_dim, seed, epochs,
         checkpoint_manager):
@@ -118,11 +123,12 @@ def train(dataset, generator, discriminator, generator_loss, discriminator_loss,
 
         print('Time for epoch {} is {} sec'.format(epoch+1, time.time()-start))
 
+
 def generate_and_save_images(model, epoch, test_input):
     predictions = model(test_input, training=False)
 
     plt.ion()
-    fig = plt.figure(1, figsize=(4,4))
+    fig = plt.figure(1, figsize=(4, 4))
 
     for i in range(predictions.shape[0]):
         plt.subplot(4, 4, i+1)
@@ -132,6 +138,7 @@ def generate_and_save_images(model, epoch, test_input):
     plt.savefig('image_at_epoch_{:04d}.png'.format(epoch))
     plt.show()
     fig.canvas.flush_events()
+
 
 if __name__ == "__main__":
     # Parameters
